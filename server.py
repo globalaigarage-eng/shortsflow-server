@@ -5,7 +5,6 @@ import subprocess
 import json
 import random
 import urllib.request
-import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -72,12 +71,12 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
-    Create a viral Title (under 45 chars) with an emoji for: "{video_title}".
+    Create a viral Short Title (under 45 chars) with an emoji for: "{video_title}".
     Do NOT include Part 1 or Clip 1.
     Respond ONLY in strict JSON:
     {{
-        "title": "Short Title",
-        "description": "Engaging description",
+        "title": "Dramatic Title",
+        "description": "Engaging 2-sentence description",
         "hashtags": "#Shorts #Viral #Trending #FYP"
     }}
     """
@@ -213,48 +212,8 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- Bot-Detection නොවැටෙන Universal Video Downloader Engine ---
-def download_stream(url: str, output_path: str):
-    # 1. YouTube Link එකක්දැයි හඳුනාගැනීම
-    yt_id = None
-    if "youtu.be/" in url:
-        yt_id = url.split("youtu.be/")[1].split("?")[0].split("&")[0]
-    elif "watch?v=" in url:
-        match = re.search(r"v=([a-zA-Z0-9_-]+)", url)
-        if match:
-            yt_id = match.group(1)
-
-    # YouTube නම් Render IP එකෙන් YouTube වෙත සෘජුව නොගොස් Invidious/Piped API හරහා ගැනීම
-    if yt_id:
-        invidious_endpoints = [
-            f"https://vid.priv.au/api/v1/videos/{yt_id}",
-            f"https://inv.nadeko.net/api/v1/videos/{yt_id}",
-            f"https://invidious.nerdvpn.de/api/v1/videos/{yt_id}",
-            f"https://invidious.jing.rocks/api/v1/videos/{yt_id}"
-        ]
-        
-        for ep in invidious_endpoints:
-            try:
-                req = urllib.request.Request(ep, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=7) as res:
-                    data = json.loads(res.read().decode("utf-8"))
-                    title = data.get("title", "Viral Clip")
-                    duration = int(data.get("lengthSeconds", 180))
-                    
-                    stream_url = None
-                    for stream in data.get("formatStreams", []):
-                        if "video/mp4" in stream.get("type", ""):
-                            stream_url = stream.get("url")
-                            break
-                    
-                    if stream_url:
-                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "300", output_path]
-                        subprocess.run(cmd, check=True)
-                        return title, duration
-            except Exception:
-                continue
-
-    # 2. Facebook, TikTok, Instagram, Rumble ආදී අනෙක් සේවාවන් සඳහා Direct yt-dlp
+# --- Universal Downloader Engine with Cookies Support ---
+def download_media(url: str, output_path: str):
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -263,9 +222,14 @@ def download_stream(url: str, output_path: str):
         'no_warnings': True,
         'nocheckcertificate': True,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
         }
     }
+
+    # cookies.txt ගොනුව තිබේ නම් එය සෘජුවම අමුණා YouTube Bot Check සම්පූර්ණයෙන්ම මඟහැරීම
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = "cookies.txt"
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         title = info.get('title', 'Viral Clip')
@@ -292,13 +256,13 @@ def process_video(req: ProcessVideoReq):
 
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
+        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! VIP ලබාගන්න.")
 
     raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
     output_data = []
 
     try:
-        video_title, total_duration = download_stream(req.youtube_url, raw_video)
+        video_title, total_duration = download_media(req.youtube_url, raw_video)
         
         clip_duration = 30
         usable_duration = max(total_duration - 15, clip_duration * req.clip_count)
@@ -315,7 +279,6 @@ def process_video(req: ProcessVideoReq):
             meta = generate_metadata_with_gemini(video_title, i)
             title_text = meta.get("title", "").replace("'", "").replace(":", "")
 
-            # 9:16 Ultra Blur Layout
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
                 "[0:v]scale=720:-1[fg];"
