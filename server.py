@@ -61,12 +61,12 @@ init_db()
 
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
-    fallback_title = f"🔥 {clean_title} - Epic Moment"
+    fallback_title = f"🔥 {clean_title} - Highlights"
 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Must watch highlight from {clean_title}! Share and follow for more.",
+            "description": f"Highlight moment from {clean_title}! Like and subscribe.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
@@ -76,8 +76,8 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     Do NOT include Part 1 or Clip 1.
     Respond ONLY in strict JSON:
     {{
-        "title": "Dramatic Short Title",
-        "description": "Short engaging 2-sentence description",
+        "title": "Short Title",
+        "description": "Engaging description",
         "hashtags": "#Shorts #Viral #Trending #FYP"
     }}
     """
@@ -94,7 +94,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     except Exception:
         return {
             "title": fallback_title,
-            "description": f"Unbelievable clip from {clean_title}!",
+            "description": f"Must see clip from {clean_title}!",
             "hashtags": "#Shorts #Viral #Trending #FYP"
         }
 
@@ -213,23 +213,30 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- Bulletproof Video Downloader Pipeline ---
+# --- Bot-Detection නොවැටෙන Universal Video Downloader Engine ---
 def download_stream(url: str, output_path: str):
-    # YouTube Link හඳුනාගැනීම
-    yt_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
-    
-    if yt_match:
-        video_id = yt_match.group(1)
-        # YouTube Bot-Block මඟහැරීම සඳහා Invidious Public Gateways
-        instances = [
-            f"https://api.invidious.io/api/v1/videos/{video_id}",
-            f"https://vid.priv.au/api/v1/videos/{video_id}",
-            f"https://inv.nadeko.net/api/v1/videos/{video_id}"
+    # 1. YouTube Link එකක්දැයි හඳුනාගැනීම
+    yt_id = None
+    if "youtu.be/" in url:
+        yt_id = url.split("youtu.be/")[1].split("?")[0].split("&")[0]
+    elif "watch?v=" in url:
+        match = re.search(r"v=([a-zA-Z0-9_-]+)", url)
+        if match:
+            yt_id = match.group(1)
+
+    # YouTube නම් Render IP එකෙන් YouTube වෙත සෘජුව නොගොස් Invidious/Piped API හරහා ගැනීම
+    if yt_id:
+        invidious_endpoints = [
+            f"https://vid.priv.au/api/v1/videos/{yt_id}",
+            f"https://inv.nadeko.net/api/v1/videos/{yt_id}",
+            f"https://invidious.nerdvpn.de/api/v1/videos/{yt_id}",
+            f"https://invidious.jing.rocks/api/v1/videos/{yt_id}"
         ]
-        for inst in instances:
+        
+        for ep in invidious_endpoints:
             try:
-                req = urllib.request.Request(inst, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=8) as res:
+                req = urllib.request.Request(ep, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=7) as res:
                     data = json.loads(res.read().decode("utf-8"))
                     title = data.get("title", "Viral Clip")
                     duration = int(data.get("lengthSeconds", 180))
@@ -241,13 +248,13 @@ def download_stream(url: str, output_path: str):
                             break
                     
                     if stream_url:
-                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "360", output_path]
+                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "300", output_path]
                         subprocess.run(cmd, check=True)
                         return title, duration
             except Exception:
                 continue
 
-    # Facebook, TikTok, Instagram, Rumble හෝ Fallback yt-dlp ක්‍රමය
+    # 2. Facebook, TikTok, Instagram, Rumble ආදී අනෙක් සේවාවන් සඳහා Direct yt-dlp
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -255,11 +262,6 @@ def download_stream(url: str, output_path: str):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web']
-            }
-        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
@@ -313,7 +315,7 @@ def process_video(req: ProcessVideoReq):
             meta = generate_metadata_with_gemini(video_title, i)
             title_text = meta.get("title", "").replace("'", "").replace(":", "")
 
-            # Render RAM සීමාව රැකගැනීමට සහ පැහැදිලි 9:16 layout එකක් සැකසීමට
+            # 9:16 Ultra Blur Layout
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
                 "[0:v]scale=720:-1[fg];"
