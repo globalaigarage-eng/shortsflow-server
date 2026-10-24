@@ -214,9 +214,12 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- YouTube Downloader Engine ---
+# --- YouTube Downloader Engine (Cookies + Web Client) ---
 def download_media_stream(url: str, output_path: str):
-    # Cookies file එක පවතින තැන සොයාගැනීම
+    # Tracking query params ඉවත් කර clean URL එකක් ලබා ගැනීම
+    clean_url = url.split("?si=")[0].split("&si=")[0].strip()
+
+    # Cookies file එක පරික්ෂා කිරීම
     cookie_file = None
     possible_paths = [
         "cookies.txt",
@@ -226,11 +229,8 @@ def download_media_stream(url: str, output_path: str):
     for p in possible_paths:
         if os.path.exists(p) and os.path.getsize(p) > 10:
             cookie_file = p
-            print(f"[DEBUG] Found cookies file at: {p}")
+            print(f"[DEBUG] Using cookies file: {p}")
             break
-
-    if not cookie_file:
-        print("[WARNING] cookies.txt file not found or empty!")
 
     ydl_opts = {
         'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
@@ -239,17 +239,17 @@ def download_media_stream(url: str, output_path: str):
         'quiet': False,
         'no_warnings': False,
         'nocheckcertificate': True,
-        'geo_bypass': True,
-        # Bot detection සම්පූර්ණයෙන්ම කඩන client combination එක
+        # Cookies නිවැරදිව වැඩ කරන්නේ web සහ mweb clients සමඟ පමණි
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embedded', 'android', 'ios'],
-                'player_skip': ['webpage', 'configs']
+                'player_client': ['web', 'mweb'],
+                'player_skip': ['configs']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Mode': 'navigate'
         }
     }
 
@@ -257,7 +257,7 @@ def download_media_stream(url: str, output_path: str):
         ydl_opts['cookiefile'] = cookie_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        info = ydl.extract_info(clean_url, download=True)
         title = info.get('title', 'Viral Clip')
         duration = int(info.get('duration') or 180)
         return title, duration
