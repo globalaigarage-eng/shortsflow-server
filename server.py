@@ -24,7 +24,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 otp_storage = {}
 
-# --- Database Setup (Monthly Clips Count Tracking) ---
+# --- Database Setup ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -60,24 +60,30 @@ def init_db():
 
 init_db()
 
-# --- Gemini Metadata Generator ---
+# --- Gemini Smart Title & Hook Generator (No "Part 1" labels) ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
+    # සැබෑ මාතෘකාව අනුව ආකර්ෂණීය Hook එකක් සැකසීම
+    clean_base = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
+    default_title = f"🔥 {clean_base} (Shocking Truth!)"
+
     if not GEMINI_API_KEY:
         return {
-            "title": f"🔥 Viral Highlight Part {clip_index + 1} - {video_title[:30]}",
-            "description": "Watch this amazing short clip! Like, comment and subscribe for more viral content.",
-            "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
+            "title": default_title,
+            "description": f"You won't believe what happens in this clip about {clean_base}. Watch till the end!",
+            "hashtags": "#Shorts #Viral #Trending #FYP #Reels #ForYou"
         }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
-    You are an expert viral content creator.
-    Based on the video title: "{video_title}", create high-performing metadata for Clip #{clip_index + 1}.
-    Respond ONLY in strict JSON format with exactly these three keys:
+    Video topic: "{video_title}".
+    Create a high-performing, hyper-engaging viral Short Title and Description.
+    DO NOT use boring labels like "Part 1", "Clip 1", or "Must Watch".
+    Make it dramatic, curious, and punchy.
+    Respond ONLY in strict JSON format:
     {{
-        "title": "A high-CTR, curiosity-inducing Short Title (under 60 chars) with emojis",
-        "description": "Short engaging 2-sentence description encouraging likes and subscribes",
-        "hashtags": "#Shorts #Viral #Trending #FYP #Reels #TikTok plus 3 niche tags"
+        "title": "A curiosity-gap title (under 55 chars) with 1 emoji",
+        "description": "2 punchy sentences summarizing the moment and driving comments",
+        "hashtags": "#Shorts #Viral #Trending #FYP plus 3 specific tags"
     }}
     """
     headers = {"Content-Type": "application/json"}
@@ -92,9 +98,9 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
             return json.loads(clean_text)
     except Exception:
         return {
-            "title": f"🔥 Must Watch Highlight - Part {clip_index + 1}",
-            "description": "Check out this amazing short clip! Like, comment and subscribe.",
-            "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
+            "title": default_title,
+            "description": f"Don't miss this unbelievable moment. Like and share if you agree!",
+            "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
 # --- Request Data Models ---
@@ -131,8 +137,7 @@ def register(req: AuthReq):
     if user_email != ADMIN_EMAIL.lower():
         if req.device_id and req.device_id != "UNKNOWN":
             cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
-            existing = cursor.fetchone()
-            if existing:
+            if cursor.fetchone():
                 conn.close()
                 raise HTTPException(
                     status_code=403, 
@@ -228,59 +233,67 @@ def activate_vip(req: ActivateVipReq):
         raise HTTPException(status_code=404, detail="User හමු නොවීය.")
     return {"status": "success", "message": f"{req.target_user_email} සඳහා VIP දින 30ක් සක්‍රීය විය!"}
 
-# --- Bulletproof Video Downloader (YouTube Bot Bypass + All Platforms) ---
+# --- Bulletproof High Quality Video Downloader ---
 def universal_download(url: str, output_path: str):
-    # 1. YouTube Video ID එක සොයා ගැනීම
+    # 1. YouTube Video ID එක පරික්ෂා කිරීම
     yt_id = None
     if "youtu.be" in url:
         yt_id = url.split("youtu.be/")[1].split("?")[0]
     elif "youtube.com" in url:
-        match = re.search(r"[?&]v=([^&#]+)", url)
-        if match:
-            yt_id = match.group(1)
+        m = re.search(r"[?&]v=([^&#]+)", url)
+        if m:
+            yt_id = m.group(1)
 
-    # 2. YouTube වීඩියෝවක් නම් Invidious Public Proxy API හරහා Block නොවී කෙලින්ම වීඩියෝ stream එක ලබා ගැනීම
+    # 2. YouTube නම් Direct Public Streams හරහා 720p/1080p ලබා ගැනීම
     if yt_id:
-        invidious_instances = [
-            "https://inv.nadeko.net",
-            "https://invidious.nerdvpn.de",
-            "https://vid.priv.au",
-            "https://invidious.jing.rocks"
+        public_gateways = [
+            f"https://pipedapi.kavin.rocks/streams/{yt_id}",
+            f"https://api.piped.private.coffee/streams/{yt_id}",
+            f"https://inv.nadeko.net/api/v1/videos/{yt_id}"
         ]
-        for inst in invidious_instances:
+        for gateway in public_gateways:
             try:
-                api_url = f"{inst}/api/v1/videos/{yt_id}"
-                req = urllib.request.Request(api_url, headers={"User-Agent": "ShortsFlow/1.0"})
-                with urllib.request.urlopen(req, timeout=8) as res:
+                req = urllib.request.Request(gateway, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as res:
                     data = json.loads(res.read().decode('utf-8'))
                     title = data.get("title", "Viral Highlight")
-                    duration = int(data.get("lengthSeconds", 180))
+                    duration = int(data.get("duration", data.get("lengthSeconds", 180)))
                     
-                    # 720p හෝ 360p direct MP4 stream එක තෝරා ගැනීම
-                    video_url = None
-                    for stream in data.get("formatStreams", []):
-                        if "video/mp4" in stream.get("type", ""):
-                            video_url = stream.get("url")
-                            break
-                    
-                    if video_url:
-                        # Direct MP4 stream එක FFmpeg මඟින් download කර ගැනීම
-                        cmd = ["ffmpeg", "-y", "-i", video_url, "-c", "copy", "-t", "300", output_path]
+                    # Direct Stream URL එක ලබා ගැනීම
+                    stream_url = None
+                    if "videoStreams" in data:
+                        for s in data["videoStreams"]:
+                            if s.get("format") == "MPEG_4" or "mp4" in s.get("mimeType", ""):
+                                stream_url = s.get("url")
+                                break
+                    elif "formatStreams" in data:
+                        for s in data["formatStreams"]:
+                            if "mp4" in s.get("type", ""):
+                                stream_url = s.get("url")
+                                break
+
+                    if stream_url:
+                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "400", output_path]
                         subprocess.run(cmd, check=True)
                         return title, duration
             except Exception:
                 continue
 
-    # 3. Facebook, TikTok, Instagram, Rumble හෝ අනෙකුත් සියලුම links සඳහා yt-dlp
+    # 3. Facebook, TikTok, Instagram හෝ Direct Extraction
     ydl_opts = {
-        'format': 'best[ext=mp4]/best',
+        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
         'overwrites': True,
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -317,7 +330,7 @@ def process_video(req: ProcessVideoReq):
     try:
         video_title, total_duration = universal_download(req.youtube_url, raw_video)
         
-        clip_duration = 30
+        clip_duration = 35
         usable_duration = max(total_duration - 15, clip_duration * req.clip_count)
         step_interval = usable_duration // (req.clip_count + 1)
 
@@ -329,19 +342,36 @@ def process_video(req: ProcessVideoReq):
             clip_name = f"clip_{int(datetime.now().timestamp())}_{i+1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            if not is_vip:
-                vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='✨ ShortsFlow AI':x=w-tw-35:y=h-th-50:fontsize=24:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
-            else:
-                vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0"
+            meta = generate_metadata_with_gemini(video_title, i)
+            viral_title_safe = meta.get("title", "").replace("'", "").replace(":", "")
 
+            # --- Pro Shorts Layout Filter ---
+            # 1. වීඩියෝව කැපී නොයන ලෙස Background එකට Blur 9:16 දමා, මූලික වීඩියෝව මැද තැබීම (Ultra Quality)
+            # 2. ඉහළින් ආකර්ෂණීය Headline Bar එකක් දැමීම
+            # 3. Free අයට පහළින් ලා සුදු Watermark එකක් දැමීම
+            base_filter = (
+                "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:10[bg];"
+                "[0:v]scale=1080:-1[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2[combined];"
+                f"[combined]drawtext=text='{viral_title_safe[:35]}':fontcolor=yellow:fontsize=48:box=1:boxcolor=black@0.6:boxborderw=15:x=(w-text_w)/2:y=180"
+            )
+
+            if not is_vip:
+                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-40:y=h-th-60:fontsize=28:fontcolor=white@0.5:shadowcolor=black@0.4:shadowx=2:shadowy=2"
+            else:
+                vf_filter = base_filter
+
+            # High Bitrate Audio & Video Rendering (CRF 20, AAC 192k)
             cmd = [
                 "ffmpeg", "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
                 "-t", str(clip_duration),
-                "-vf", vf_filter, "-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast", final_path
+                "-filter_complex", vf_filter,
+                "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                final_path
             ]
             subprocess.run(cmd, check=True)
 
-            meta = generate_metadata_with_gemini(video_title, i)
             output_data.append({
                 "clip_url": f"https://shortsflow-server.onrender.com/output/{clip_name}",
                 "title": meta.get("title", ""),
