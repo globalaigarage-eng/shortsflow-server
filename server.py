@@ -16,11 +16,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 ADMIN_EMAIL = "anushkamalshan666@gmail.com"
-
-# GitHub Block නොවීමට API Key එක Environment Variable එකෙන් කියවයි
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# --- Database Setup ---
+# --- Database Setup (Device ID සහාය සහිතව) ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -31,12 +29,19 @@ def init_db():
             is_vip INTEGER DEFAULT 0,
             vip_expiry TEXT,
             monthly_links_used INTEGER DEFAULT 0,
-            last_reset_month TEXT
+            last_reset_month TEXT,
+            device_id TEXT
         )
     """)
+    # Database migration (device_id තීරුව කලින් නැත්නම් එකතු කිරීම)
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     cursor.execute("SELECT email FROM users WHERE email = ?", (ADMIN_EMAIL,))
     if not cursor.fetchone():
-        cursor.execute("INSERT INTO users VALUES (?, ?, 1, '2099-12-31', 0, ?)", 
+        cursor.execute("INSERT INTO users VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')", 
                        (ADMIN_EMAIL, "admin123", datetime.now().strftime("%Y-%m")))
     conn.commit()
     conn.close()
@@ -45,7 +50,6 @@ init_db()
 
 # --- Gemini AI Metadata Generator ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
-    # API Key එකක් නොමැති නම් default template එකක් ලබා දෙයි
     if not GEMINI_API_KEY:
         return {
             "title": f"🔥 Viral Highlight Part {clip_index + 1} - {video_title[:30]}",
@@ -85,6 +89,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
 class AuthReq(BaseModel):
     email: str
     password: str
+    device_id: str = "UNKNOWN"
 
 class ActivateVipReq(BaseModel):
     admin_email: str
@@ -101,11 +106,26 @@ def register(req: AuthReq):
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
     current_month = datetime.now().strftime("%Y-%m")
+    user_email = req.email.lower().strip()
+    
+    # 1. Admin Email එකක් නම් කිසිදු Device Check එකක් නොකරයි
+    if user_email != ADMIN_EMAIL.lower():
+        # 2. මෙම Phone (Device ID) එකෙන් දැනටමත් Free ගිණුමක් සාදා ඇත්දැයි බැලීම
+        if req.device_id and req.device_id != "UNKNOWN":
+            cursor.execute("SELECT email, is_vip FROM users WHERE device_id = ?", (req.device_id,))
+            existing = cursor.fetchone()
+            if existing:
+                conn.close()
+                raise HTTPException(
+                    status_code=403, 
+                    detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත! එක Phone එකකට එක Free ගිණුමක් පමණි. Unlimited භාවිතයට VIP ලබාගන්න."
+                )
+
     try:
-        cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?)", 
-                       (req.email.lower().strip(), req.password, current_month))
+        cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?, ?)", 
+                       (user_email, req.password, current_month, req.device_id))
         conn.commit()
-        return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
+        return {"status": "success", "message": "ගිණුම සාර්ථකව සාදන ලදී!"}
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
     finally:
@@ -208,7 +228,7 @@ def process_video(req: ProcessVideoReq):
 
             meta = generate_metadata_with_gemini(video_title, i)
             output_data.append({
-                "clip_url": f"https://shortsflow-api.onrender.com/output/{clip_name}",
+                "clip_url": f"https://shortsflow-server.onrender.com/output/{clip_name}",
                 "title": meta.get("title", ""),
                 "description": meta.get("description", ""),
                 "hashtags": meta.get("hashtags", "")
