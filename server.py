@@ -2,6 +2,7 @@ import os
 import sqlite3
 import subprocess
 import json
+import random
 import urllib.request
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
@@ -16,9 +17,12 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 ADMIN_EMAIL = "anushkamalshan666@gmail.com"
+ADMIN_PASSWORD = "@Anushka*malshan2005"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# --- Database Setup (Device ID සහාය සහිතව) ---
+otp_storage = {}
+
+# --- Database Setup (Device Binding + Admin Credentials) ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -33,7 +37,6 @@ def init_db():
             device_id TEXT
         )
     """)
-    # Database migration (device_id තීරුව කලින් නැත්නම් එකතු කිරීම)
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
     except sqlite3.OperationalError:
@@ -42,7 +45,10 @@ def init_db():
     cursor.execute("SELECT email FROM users WHERE email = ?", (ADMIN_EMAIL,))
     if not cursor.fetchone():
         cursor.execute("INSERT INTO users VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')", 
-                       (ADMIN_EMAIL, "admin123", datetime.now().strftime("%Y-%m")))
+                       (ADMIN_EMAIL, ADMIN_PASSWORD, datetime.now().strftime("%Y-%m")))
+    else:
+        cursor.execute("UPDATE users SET password = ? WHERE email = ?", (ADMIN_PASSWORD, ADMIN_EMAIL))
+    
     conn.commit()
     conn.close()
 
@@ -53,7 +59,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     if not GEMINI_API_KEY:
         return {
             "title": f"🔥 Viral Highlight Part {clip_index + 1} - {video_title[:30]}",
-            "description": "Watch this amazing short clip! Don't forget to like, share and subscribe for more viral content.",
+            "description": "Watch this amazing short clip! Like, comment and subscribe for more viral content.",
             "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
         }
 
@@ -81,15 +87,23 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     except Exception:
         return {
             "title": f"🔥 Must Watch Highlight - Part {clip_index + 1}",
-            "description": "Check out this amazing short clip! Like, comment and subscribe for more amazing content daily.",
+            "description": "Check out this amazing short clip! Like, comment and subscribe.",
             "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
         }
 
-# --- Request Models ---
+# --- Request Data Models ---
 class AuthReq(BaseModel):
     email: str
     password: str
     device_id: str = "UNKNOWN"
+
+class ForgotReq(BaseModel):
+    email: str
+
+class ResetReq(BaseModel):
+    email: str
+    otp: str
+    new_password: str
 
 class ActivateVipReq(BaseModel):
     admin_email: str
@@ -108,24 +122,23 @@ def register(req: AuthReq):
     current_month = datetime.now().strftime("%Y-%m")
     user_email = req.email.lower().strip()
     
-    # 1. Admin Email එකක් නම් කිසිදු Device Check එකක් නොකරයි
+    # Free සාමාජිකයින්ට එකම Phone එකෙන් Fake accounts සෑදීම වැළැක්වීම
     if user_email != ADMIN_EMAIL.lower():
-        # 2. මෙම Phone (Device ID) එකෙන් දැනටමත් Free ගිණුමක් සාදා ඇත්දැයි බැලීම
         if req.device_id and req.device_id != "UNKNOWN":
-            cursor.execute("SELECT email, is_vip FROM users WHERE device_id = ?", (req.device_id,))
+            cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
             existing = cursor.fetchone()
             if existing:
                 conn.close()
                 raise HTTPException(
                     status_code=403, 
-                    detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත! එක Phone එකකට එක Free ගිණුමක් පමණි. Unlimited භාවිතයට VIP ලබාගන්න."
+                    detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත! එක Phone එකකට එක Free ගිණුමකි."
                 )
 
     try:
         cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?, ?)", 
                        (user_email, req.password, current_month, req.device_id))
         conn.commit()
-        return {"status": "success", "message": "ගිණුම සාර්ථකව සාදන ලදී!"}
+        return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
     finally:
@@ -155,6 +168,42 @@ def login(req: AuthReq):
         "is_admin": (email.lower() == ADMIN_EMAIL.lower()),
         "links_used": links_used
     }
+
+@app.post("/auth/forgot-password")
+def forgot_password(req: ForgotReq):
+    conn = sqlite3.connect("shortsflow.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT email FROM users WHERE email = ?", (req.email.lower().strip(),))
+    user = cursor.fetchone()
+    conn.close()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="මෙම Email ලිපිනය සහිත ගිණුමක් හමු නොවීය.")
+
+    otp = str(random.randint(100000, 999999))
+    otp_storage[req.email.lower().strip()] = otp
+
+    return {
+        "status": "success", 
+        "message": "OTP කේතය ඔබගේ Email එකට යවන ලදී (Demo OTP: " + otp + ")"
+    }
+
+@app.post("/auth/reset-password")
+def reset_password(req: ResetReq):
+    target_email = req.email.lower().strip()
+    stored_otp = otp_storage.get(target_email)
+
+    if not stored_otp or stored_otp != req.otp.strip():
+        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි හෝ කල් ඉකුත් වී ඇත.")
+
+    conn = sqlite3.connect("shortsflow.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET password = ? WHERE email = ?", (req.new_password, target_email))
+    conn.commit()
+    conn.close()
+
+    del otp_storage[target_email]
+    return {"status": "success", "message": "Password එක සාර්ථකව වෙනස් කරන ලදී! දැන් Login විය හැක."}
 
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
@@ -187,7 +236,6 @@ def process_video(req: ProcessVideoReq):
     
     is_vip, links_used = user[0], user[1]
 
-    # Limits: Free = උපරිම 2 | VIP = උපරිම 10
     max_allowed = 10 if is_vip else 2
     if req.clip_count > max_allowed:
         conn.close()
@@ -216,7 +264,8 @@ def process_video(req: ProcessVideoReq):
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             if not is_vip:
-                vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='ShortsFlow Free':x=w-tw-20:y=h-th-40:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5"
+                # දකුණු පස පහළ කෙළවරින් 55% විනිවිද පෙනෙන ලා සුදු Watermark එක
+                vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='✨ ShortsFlow AI':x=w-tw-35:y=h-th-50:fontsize=24:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0"
 
