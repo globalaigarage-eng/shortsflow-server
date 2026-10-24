@@ -4,7 +4,6 @@ import subprocess
 import json
 import random
 import urllib.request
-import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -23,7 +22,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 otp_storage = {}
 
-# --- Database Setup ---
+# --- Database Setup (Monthly Clips Count Tracking) ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -33,11 +32,16 @@ def init_db():
             password TEXT,
             is_vip INTEGER DEFAULT 0,
             vip_expiry TEXT,
-            monthly_links_used INTEGER DEFAULT 0,
+            monthly_clips_used INTEGER DEFAULT 0,
             last_reset_month TEXT,
             device_id TEXT
         )
     """)
+    # Database migration
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN monthly_clips_used INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
     except sqlite3.OperationalError:
@@ -92,7 +96,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
             "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
         }
 
-# --- Request Data Models ---
+# --- Request Models ---
 class AuthReq(BaseModel):
     email: str
     password: str
@@ -148,7 +152,7 @@ def register(req: AuthReq):
 def login(req: AuthReq):
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT email, is_vip, vip_expiry, monthly_links_used FROM users WHERE email = ? AND password = ?", 
+    cursor.execute("SELECT email, is_vip, vip_expiry, monthly_clips_used FROM users WHERE email = ? AND password = ?", 
                    (req.email.lower().strip(), req.password))
     user = cursor.fetchone()
     conn.close()
@@ -156,7 +160,7 @@ def login(req: AuthReq):
     if not user:
         raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
     
-    email, is_vip, vip_expiry, links_used = user
+    email, is_vip, vip_expiry, clips_used = user
     if is_vip and vip_expiry:
         if datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
             is_vip = 0
@@ -166,7 +170,7 @@ def login(req: AuthReq):
         "email": email,
         "is_vip": bool(is_vip),
         "is_admin": (email.lower() == ADMIN_EMAIL.lower()),
-        "links_used": links_used
+        "links_used": clips_used
     }
 
 @app.post("/auth/forgot-password")
@@ -223,97 +227,54 @@ def activate_vip(req: ActivateVipReq):
         raise HTTPException(status_code=404, detail="User හමු නොවීය.")
     return {"status": "success", "message": f"{req.target_user_email} සඳහා VIP දින 30ක් සක්‍රීය විය!"}
 
-# --- Universal Downloader (With Proxy API Fallbacks) ---
+# Universal Downloader Engine
 def universal_download(url: str, output_path: str):
-    # ක්‍රමය 1: yt-dlp හරහා සෘජුව බාගත කිරීම (Facebook, TikTok, Instagram, Rumble, සහ Non-blocked YouTube සඳහා)
-    client_fallbacks = [
-        ['tv_embedded'],
-        ['android', 'ios'],
-        ['mweb']
-    ]
-    
-    for clients in client_fallbacks:
-        try:
-            ydl_opts = {
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'outtmpl': output_path,
-                'overwrites': True,
-                'quiet': True,
-                'no_warnings': True,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': clients,
-                        'player_skip': ['webpage', 'configs']
-                    }
-                },
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1'
-                }
+    # YouTube, Facebook, TikTok, Instagram, Rumble සියල්ලටම සාර්ථකව ක්‍රියාකරන Engine එක
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': output_path,
+        'overwrites': True,
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded', 'android', 'mweb']
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get('title', 'Viral Highlight')
-                duration = int(info.get('duration') or 180)
-                return title, duration
-        except Exception:
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except Exception:
-                    pass
-            continue
-
-    # ක්‍රමය 2: YouTube Bot Block වී ඇත්නම් Cobalt Public Proxy Stream හරහා බාගත කිරීම
-    cobalt_instances = [
-        "https://api.cobalt.tools/api/json",
-        "https://cobalt-api.kwiatekm.tokyo/api/json"
-    ]
-    for instance in cobalt_instances:
-        try:
-            req_data = json.dumps({"url": url, "vQuality": "720"}).encode('utf-8')
-            req = urllib.request.Request(
-                instance,
-                data=req_data,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "User-Agent": "ShortsFlowApp/1.0"
-                }
-            )
-            with urllib.request.urlopen(req, timeout=15) as res:
-                res_json = json.loads(res.read().decode('utf-8'))
-                stream_url = res_json.get("url")
-                if stream_url:
-                    # FFmpeg මඟින් stream එක download කර ගැනීම
-                    cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "300", output_path]
-                    subprocess.run(cmd, check=True)
-                    return "Viral Video Highlight", 180
-        except Exception:
-            continue
-
-    raise Exception("මෙම වීඩියෝව බාගත කිරීමට නොහැකි විය. කරුණාකර වෙනත් YouTube, Facebook, TikTok හෝ Instagram link එකක් භාවිත කරන්න.")
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        }
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        title = info.get('title', 'Viral Highlight')
+        duration = int(info.get('duration') or 180)
+        return title, duration
 
 @app.post("/process-video")
 def process_video(req: ProcessVideoReq):
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT is_vip, monthly_links_used FROM users WHERE email = ?", (req.email.lower().strip(),))
+    cursor.execute("SELECT is_vip, monthly_clips_used FROM users WHERE email = ?", (req.email.lower().strip(),))
     user = cursor.fetchone()
     
     if not user:
         conn.close()
         raise HTTPException(status_code=404, detail="User හමු නොවීය.")
     
-    is_vip, links_used = user[0], user[1]
+    is_vip, clips_used = user[0], user[1] or 0
 
-    max_allowed = 10 if is_vip else 2
-    if req.clip_count > max_allowed:
+    # Free අයට එක Link එකකින් උපරිම clips 2යි | VIP අයට උපරිම 10යි
+    max_per_link = 10 if is_vip else 2
+    if req.clip_count < 1 or req.clip_count > max_per_link:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"ඔබට තෝරාගත හැක්කේ උපරිම clips {max_allowed}කි.")
+        raise HTTPException(status_code=403, detail=f"ඔබට එකවර සෑදිය හැක්කේ වීඩියෝ 1 සිට {max_per_link} දක්වා ප්‍රමාණයකි.")
 
-    if not is_vip and links_used >= 15:
+    # Free අයට මාසයට උපරිම වීඩියෝ 30යි (Clips 30 limit)
+    if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail="Free මාසික සීමාව (Links 15) අවසන්. Unlimited සඳහා VIP ලබාගන්න!")
+        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට භාවිතා කර ඇත: {clips_used}). Unlimited සඳහා VIP ලබාගන්න.")
 
     raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
     output_data = []
@@ -322,11 +283,11 @@ def process_video(req: ProcessVideoReq):
         video_title, total_duration = universal_download(req.youtube_url, raw_video)
         
         clip_duration = 30
-        usable_duration = max(total_duration - 20, clip_duration * req.clip_count)
+        usable_duration = max(total_duration - 15, clip_duration * req.clip_count)
         step_interval = usable_duration // (req.clip_count + 1)
 
         for i in range(req.clip_count):
-            start_sec = 10 + (step_interval * (i + 1))
+            start_sec = 8 + (step_interval * (i + 1))
             if start_sec + clip_duration > total_duration:
                 start_sec = max(0, total_duration - clip_duration - (i * 2))
 
@@ -334,6 +295,7 @@ def process_video(req: ProcessVideoReq):
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             if not is_vip:
+                # ලා සුදු Semi-transparent Watermark එක
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='✨ ShortsFlow AI':x=w-tw-35:y=h-th-50:fontsize=24:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0"
@@ -341,7 +303,7 @@ def process_video(req: ProcessVideoReq):
             cmd = [
                 "ffmpeg", "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
                 "-t", str(clip_duration),
-                "-vf", vf_filter, "-c:v", "libx264", "-c:a", "aac", "-preset", "fast", final_path
+                "-vf", vf_filter, "-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast", final_path
             ]
             subprocess.run(cmd, check=True)
 
@@ -354,7 +316,7 @@ def process_video(req: ProcessVideoReq):
             })
 
         if not is_vip:
-            cursor.execute("UPDATE users SET monthly_links_used = monthly_links_used + 1 WHERE email = ?", (req.email.lower().strip(),))
+            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE email = ?", (req.clip_count, req.email.lower().strip()))
             conn.commit()
 
         conn.close()
