@@ -1,9 +1,11 @@
 import os
+import re
 import sqlite3
 import subprocess
 import json
 import random
 import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -37,7 +39,6 @@ def init_db():
             device_id TEXT
         )
     """)
-    # Database migration
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN monthly_clips_used INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
@@ -96,7 +97,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
             "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
         }
 
-# --- Request Models ---
+# --- Request Data Models ---
 class AuthReq(BaseModel):
     email: str
     password: str
@@ -227,28 +228,64 @@ def activate_vip(req: ActivateVipReq):
         raise HTTPException(status_code=404, detail="User හමු නොවීය.")
     return {"status": "success", "message": f"{req.target_user_email} සඳහා VIP දින 30ක් සක්‍රීය විය!"}
 
-# Universal Downloader Engine
+# --- Bulletproof Video Downloader (YouTube Bot Bypass + All Platforms) ---
 def universal_download(url: str, output_path: str):
-    # YouTube, Facebook, TikTok, Instagram, Rumble සියල්ලටම සාර්ථකව ක්‍රියාකරන Engine එක
+    # 1. YouTube Video ID එක සොයා ගැනීම
+    yt_id = None
+    if "youtu.be" in url:
+        yt_id = url.split("youtu.be/")[1].split("?")[0]
+    elif "youtube.com" in url:
+        match = re.search(r"[?&]v=([^&#]+)", url)
+        if match:
+            yt_id = match.group(1)
+
+    # 2. YouTube වීඩියෝවක් නම් Invidious Public Proxy API හරහා Block නොවී කෙලින්ම වීඩියෝ stream එක ලබා ගැනීම
+    if yt_id:
+        invidious_instances = [
+            "https://inv.nadeko.net",
+            "https://invidious.nerdvpn.de",
+            "https://vid.priv.au",
+            "https://invidious.jing.rocks"
+        ]
+        for inst in invidious_instances:
+            try:
+                api_url = f"{inst}/api/v1/videos/{yt_id}"
+                req = urllib.request.Request(api_url, headers={"User-Agent": "ShortsFlow/1.0"})
+                with urllib.request.urlopen(req, timeout=8) as res:
+                    data = json.loads(res.read().decode('utf-8'))
+                    title = data.get("title", "Viral Highlight")
+                    duration = int(data.get("lengthSeconds", 180))
+                    
+                    # 720p හෝ 360p direct MP4 stream එක තෝරා ගැනීම
+                    video_url = None
+                    for stream in data.get("formatStreams", []):
+                        if "video/mp4" in stream.get("type", ""):
+                            video_url = stream.get("url")
+                            break
+                    
+                    if video_url:
+                        # Direct MP4 stream එක FFmpeg මඟින් download කර ගැනීම
+                        cmd = ["ffmpeg", "-y", "-i", video_url, "-c", "copy", "-t", "300", output_path]
+                        subprocess.run(cmd, check=True)
+                        return title, duration
+            except Exception:
+                continue
+
+    # 3. Facebook, TikTok, Instagram, Rumble හෝ අනෙකුත් සියලුම links සඳහා yt-dlp
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/best',
         'outtmpl': output_path,
         'overwrites': True,
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['tv_embedded', 'android', 'mweb']
-            }
-        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        title = info.get('title', 'Viral Highlight')
+        title = info.get('title', 'Viral Video')
         duration = int(info.get('duration') or 180)
         return title, duration
 
@@ -265,16 +302,14 @@ def process_video(req: ProcessVideoReq):
     
     is_vip, clips_used = user[0], user[1] or 0
 
-    # Free අයට එක Link එකකින් උපරිම clips 2යි | VIP අයට උපරිම 10යි
     max_per_link = 10 if is_vip else 2
     if req.clip_count < 1 or req.clip_count > max_per_link:
         conn.close()
         raise HTTPException(status_code=403, detail=f"ඔබට එකවර සෑදිය හැක්කේ වීඩියෝ 1 සිට {max_per_link} දක්වා ප්‍රමාණයකි.")
 
-    # Free අයට මාසයට උපරිම වීඩියෝ 30යි (Clips 30 limit)
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට භාවිතා කර ඇත: {clips_used}). Unlimited සඳහා VIP ලබාගන්න.")
+        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (භාවිත කර ඇත: {clips_used}). Unlimited සඳහා VIP ලබාගන්න.")
 
     raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
     output_data = []
@@ -295,7 +330,6 @@ def process_video(req: ProcessVideoReq):
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             if not is_vip:
-                # ලා සුදු Semi-transparent Watermark එක
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='✨ ShortsFlow AI':x=w-tw-35:y=h-th-50:fontsize=24:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0"
