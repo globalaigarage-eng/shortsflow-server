@@ -4,6 +4,7 @@ import subprocess
 import json
 import random
 import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +23,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 otp_storage = {}
 
-# --- Database Setup (Device Binding + Admin Credentials) ---
+# --- Database Setup ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -54,7 +55,7 @@ def init_db():
 
 init_db()
 
-# --- Gemini AI Metadata Generator ---
+# --- Gemini Metadata Generator ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     if not GEMINI_API_KEY:
         return {
@@ -222,6 +223,76 @@ def activate_vip(req: ActivateVipReq):
         raise HTTPException(status_code=404, detail="User හමු නොවීය.")
     return {"status": "success", "message": f"{req.target_user_email} සඳහා VIP දින 30ක් සක්‍රීය විය!"}
 
+# --- Universal Downloader (With Proxy API Fallbacks) ---
+def universal_download(url: str, output_path: str):
+    # ක්‍රමය 1: yt-dlp හරහා සෘජුව බාගත කිරීම (Facebook, TikTok, Instagram, Rumble, සහ Non-blocked YouTube සඳහා)
+    client_fallbacks = [
+        ['tv_embedded'],
+        ['android', 'ios'],
+        ['mweb']
+    ]
+    
+    for clients in client_fallbacks:
+        try:
+            ydl_opts = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': output_path,
+                'overwrites': True,
+                'quiet': True,
+                'no_warnings': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': clients,
+                        'player_skip': ['webpage', 'configs']
+                    }
+                },
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1'
+                }
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get('title', 'Viral Highlight')
+                duration = int(info.get('duration') or 180)
+                return title, duration
+        except Exception:
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception:
+                    pass
+            continue
+
+    # ක්‍රමය 2: YouTube Bot Block වී ඇත්නම් Cobalt Public Proxy Stream හරහා බාගත කිරීම
+    cobalt_instances = [
+        "https://api.cobalt.tools/api/json",
+        "https://cobalt-api.kwiatekm.tokyo/api/json"
+    ]
+    for instance in cobalt_instances:
+        try:
+            req_data = json.dumps({"url": url, "vQuality": "720"}).encode('utf-8')
+            req = urllib.request.Request(
+                instance,
+                data=req_data,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "ShortsFlowApp/1.0"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=15) as res:
+                res_json = json.loads(res.read().decode('utf-8'))
+                stream_url = res_json.get("url")
+                if stream_url:
+                    # FFmpeg මඟින් stream එක download කර ගැනීම
+                    cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "300", output_path]
+                    subprocess.run(cmd, check=True)
+                    return "Viral Video Highlight", 180
+        except Exception:
+            continue
+
+    raise Exception("මෙම වීඩියෝව බාගත කිරීමට නොහැකි විය. කරුණාකර වෙනත් YouTube, Facebook, TikTok හෝ Instagram link එකක් භාවිත කරන්න.")
+
 @app.post("/process-video")
 def process_video(req: ProcessVideoReq):
     conn = sqlite3.connect("shortsflow.db")
@@ -246,59 +317,10 @@ def process_video(req: ProcessVideoReq):
 
     raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
     output_data = []
-    
-    # YouTube Bot Block bypass කිරීම සඳහා බහු Client Profiles (TV Embedded, iOS, Android, MWeb)
-    client_profiles = [
-        (['tv_embedded'], 'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV) AppleWebKit/538.1 (KHTML, like Gecko) TV Safari/538.1'),
-        (['ios'], 'com.google.ios.youtube/19.12.3 (iPhone14,3; U; CPU iOS 17_4 like Mac OS X; en_US)'),
-        (['android'], 'com.google.android.youtube/19.11.38 (Linux; U; Android 14; en_US)'),
-        (['mweb'], 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1')
-    ]
-
-    download_success = False
-    video_title = "Viral Highlight"
-    total_duration = 180
-
-    for clients, uagent in client_profiles:
-        try:
-            ydl_opts = {
-                'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
-                'outtmpl': raw_video,
-                'overwrites': True,
-                'quiet': True,
-                'no_warnings': True,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': clients,
-                        'player_skip': ['webpage', 'configs']
-                    }
-                },
-                'http_headers': {
-                    'User-Agent': uagent
-                }
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(req.youtube_url, download=True)
-                video_title = info.get('title', 'Viral Highlight')
-                total_duration = int(info.get('duration') or 180)
-                download_success = True
-                break
-        except Exception:
-            if os.path.exists(raw_video):
-                try:
-                    os.remove(raw_video)
-                except Exception:
-                    pass
-            continue
-
-    if not download_success:
-        conn.close()
-        raise HTTPException(
-            status_code=500, 
-            detail="YouTube Bot-Detection මඟින් බාගත කිරීම අවහිර කරන ලදී. කරුණාකර වෙනත් YouTube Link එකක් හෝ Facebook/TikTok/Instagram link එකක් භාවිත කරන්න."
-        )
 
     try:
+        video_title, total_duration = universal_download(req.youtube_url, raw_video)
+        
         clip_duration = 30
         usable_duration = max(total_duration - 20, clip_duration * req.clip_count)
         step_interval = usable_duration // (req.clip_count + 1)
@@ -312,7 +334,6 @@ def process_video(req: ProcessVideoReq):
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             if not is_vip:
-                # දකුණු පස පහළ කෙළවරින් 55% විනිවිද පෙනෙන ලා සුදු Watermark එක
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='✨ ShortsFlow AI':x=w-tw-35:y=h-th-50:fontsize=24:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0"
