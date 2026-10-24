@@ -1,13 +1,15 @@
 import os
 import sqlite3
 import subprocess
+import json
+import urllib.request
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
 
-app = FastAPI()
+app = FastAPI(title="ShortsFlow AI Backend")
 
 OUTPUT_DIR = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -15,7 +17,10 @@ app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 ADMIN_EMAIL = "anushkamalshan666@gmail.com"
 
-# --- Database Setup (ගිණුම් සහ සීමාවන් සේව් කරන තැන) ---
+# GitHub Block නොවීමට API Key එක Environment Variable එකෙන් කියවයි
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+# --- Database Setup ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -29,7 +34,6 @@ def init_db():
             last_reset_month TEXT
         )
     """)
-    # Admin ගිණුම ස්වයංක්‍රීයව ඇතුළත් කිරීම
     cursor.execute("SELECT email FROM users WHERE email = ?", (ADMIN_EMAIL,))
     if not cursor.fetchone():
         cursor.execute("INSERT INTO users VALUES (?, ?, 1, '2099-12-31', 0, ?)", 
@@ -38,6 +42,44 @@ def init_db():
     conn.close()
 
 init_db()
+
+# --- Gemini AI Metadata Generator ---
+def generate_metadata_with_gemini(video_title: str, clip_index: int):
+    # API Key එකක් නොමැති නම් default template එකක් ලබා දෙයි
+    if not GEMINI_API_KEY:
+        return {
+            "title": f"🔥 Viral Highlight Part {clip_index + 1} - {video_title[:30]}",
+            "description": "Watch this amazing short clip! Don't forget to like, share and subscribe for more viral content.",
+            "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
+        }
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    prompt = f"""
+    You are an expert viral content creator.
+    Based on the YouTube video title: "{video_title}", create high-performing metadata for Clip #{clip_index + 1}.
+    Respond ONLY in strict JSON format with exactly these three keys:
+    {{
+        "title": "A high-CTR, curiosity-inducing Short Title (under 60 chars) with emojis",
+        "description": "Short engaging 2-sentence description encouraging likes and subscribes",
+        "hashtags": "#Shorts #Viral #Trending #FYP #YouTubeShorts plus 3 niche specific tags"
+    }}
+    """
+    headers = {"Content-Type": "application/json"}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
+            clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_text)
+    except Exception:
+        return {
+            "title": f"🔥 Must Watch Highlight - Part {clip_index + 1}",
+            "description": "Check out this amazing short clip! Like, comment and subscribe for more amazing content daily.",
+            "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
+        }
 
 # --- Request Models ---
 class AuthReq(BaseModel):
@@ -54,7 +96,6 @@ class ProcessVideoReq(BaseModel):
     clip_count: int
 
 # --- API Endpoints ---
-
 @app.post("/auth/register")
 def register(req: AuthReq):
     conn = sqlite3.connect("shortsflow.db")
@@ -64,7 +105,7 @@ def register(req: AuthReq):
         cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?)", 
                        (req.email.lower().strip(), req.password, current_month))
         conn.commit()
-        return {"status": "success", "message": "ගිණුම සාර්ථකව සාදන ලදී!"}
+        return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
     finally:
@@ -98,7 +139,7 @@ def login(req: AuthReq):
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
     if req.admin_email.lower().strip() != ADMIN_EMAIL.lower():
-        raise HTTPException(status_code=403, detail="අවසර නොමැත.")
+        raise HTTPException(status_code=403, detail="අවසර නැත.")
     
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = sqlite3.connect("shortsflow.db")
@@ -110,7 +151,7 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     
     if changes == 0:
-        raise HTTPException(status_code=404, detail="User කෙනෙක් හමු නොවීය.")
+        raise HTTPException(status_code=404, detail="User හමු නොවීය.")
     return {"status": "success", "message": f"{req.target_user_email} සඳහා VIP දින 30ක් සක්‍රීය විය!"}
 
 @app.post("/process-video")
@@ -126,27 +167,31 @@ def process_video(req: ProcessVideoReq):
     
     is_vip, links_used = user[0], user[1]
 
-    # Free Limits (Links 15යි, එක Link එකකින් Clips 2යි)
-    if not is_vip:
-        if req.clip_count > 2:
-            conn.close()
-            raise HTTPException(status_code=403, detail="Free අයට උපරිම clips 2යි හදන්න පුළුවන්. VIP ලබාගන්න.")
-        if links_used >= 15:
-            conn.close()
-            raise HTTPException(status_code=403, detail="මාසික Links 15 සීමාව අවසන්. Unlimited සඳහා VIP ලබාගන්න.")
+    # Limits: Free = උපරිම 2 | VIP = උපරිම 10
+    max_allowed = 10 if is_vip else 2
+    if req.clip_count > max_allowed:
+        conn.close()
+        raise HTTPException(status_code=403, detail=f"ඔබට තෝරාගත හැක්කේ උපරිම clips {max_allowed}කි.")
+
+    if not is_vip and links_used >= 15:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Free මාසික සීමාව (Links 15) අවසන්. Unlimited සඳහා VIP ලබාගන්න!")
 
     raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
-    output_clips = []
+    output_data = []
     
     try:
-        # වීඩියෝව බාගත කිරීම
-        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 'outtmpl': raw_video, 'overwrites': True}
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+            'outtmpl': raw_video,
+            'overwrites': True
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([req.youtube_url])
+            info = ydl.extract_info(req.youtube_url, download=True)
+            video_title = info.get('title', 'Viral Highlight')
 
-        # Clips කැපීම සහ Watermark දැමීම
         for i in range(req.clip_count):
-            start_sec = 25 + (i * 35)
+            start_sec = 20 + (i * 35)
             clip_name = f"clip_{int(datetime.now().timestamp())}_{i+1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
@@ -160,14 +205,24 @@ def process_video(req: ProcessVideoReq):
                 "-vf", vf_filter, "-c:v", "libx264", "-c:a", "aac", "-preset", "fast", final_path
             ]
             subprocess.run(cmd, check=True)
-            output_clips.append(f"http://127.0.0.1:8000/output/{clip_name}")
+
+            meta = generate_metadata_with_gemini(video_title, i)
+            output_data.append({
+                "clip_url": f"https://shortsflow-api.onrender.com/output/{clip_name}",
+                "title": meta.get("title", ""),
+                "description": meta.get("description", ""),
+                "hashtags": meta.get("hashtags", "")
+            })
 
         if not is_vip:
             cursor.execute("UPDATE users SET monthly_links_used = monthly_links_used + 1 WHERE email = ?", (req.email.lower().strip(),))
             conn.commit()
 
         conn.close()
-        return {"status": "success", "clips": output_clips}
+        if os.path.exists(raw_video):
+            os.remove(raw_video)
+
+        return {"status": "success", "results": output_data}
 
     except Exception as e:
         if os.path.exists(raw_video):
@@ -177,4 +232,4 @@ def process_video(req: ProcessVideoReq):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=10000)
