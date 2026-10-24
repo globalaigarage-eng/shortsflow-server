@@ -218,38 +218,52 @@ def activate_vip(req: ActivateVipReq):
 def download_media_stream(url: str, output_path: str):
     is_youtube = ("youtube.com" in url) or ("youtu.be" in url)
 
-    # 1. Cobalt API මඟින් YouTube බාගත කිරීමට ප්‍රථමයෙන් උත්සාහ කිරීම
+    # 1. YouTube නම්: Cobalt API හරහා බාගත කිරීමට ප්‍රථමයෙන් උත්සාහ කිරීම
     if is_youtube:
         cobalt_api_list = [
-            "https://api.cobalt.tools",
             "https://cobalt-api.kwiatekm.tokyo",
+            "https://api.cobalt.tools",
+            "https://cobalt.api.hyper.lol",
             "https://co.wuk.sh"
         ]
 
         for base_url in cobalt_api_list:
             try:
-                post_data = json.dumps({"url": url, "videoQuality": "720"}).encode('utf-8')
+                payload = {
+                    "url": url,
+                    "videoQuality": "720",
+                    "downloadMode": "auto"
+                }
+                post_data = json.dumps(payload).encode('utf-8')
+                
                 req = urllib.request.Request(
                     f"{base_url}/",
                     data=post_data,
                     headers={
                         "Accept": "application/json",
                         "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0"
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                     }
                 )
-                with urllib.request.urlopen(req, timeout=10) as response:
+                with urllib.request.urlopen(req, timeout=12) as response:
                     res_body = json.loads(response.read().decode('utf-8'))
                     stream_url = res_body.get("url")
+                    
                     if stream_url:
-                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "400", output_path]
-                        subprocess.run(cmd, check=True)
+                        cmd = [
+                            "ffmpeg", "-y", 
+                            "-headers", "User-Agent: Mozilla/5.0\r\n",
+                            "-i", stream_url, 
+                            "-c", "copy", 
+                            "-t", "360", 
+                            output_path
+                        ]
+                        subprocess.run(cmd, check=True, timeout=90)
                         return "Viral YouTube Video", 180
             except Exception:
                 continue
 
-    # 2. Cobalt අසාර්ථක වුවහොත් හෝ වෙනත් Platform එකක් නම් yt-dlp ක්‍රියාත්මක කිරීම
-    # YouTube bot block එක වැළැක්වීමට android client හා cookies යොදා ගැනීම
+    # 2. Cobalt fail වුවහොත් හෝ TikTok / FB / Insta සඳහා yt-dlp යොදා ගැනීම
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -259,15 +273,15 @@ def download_media_stream(url: str, output_path: str):
         'nocheckcertificate': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios']
+                'player_client': ['android', 'ios', 'web_embedded']
             }
         },
         'http_headers': {
-            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
     }
 
-    # Cookies file තිබේදැයි පරීක්ෂා කර එක් කිරීම
+    # Cookies ගොනුව තිබේ නම් එකතු කිරීම
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = "cookies.txt"
     elif os.path.exists("/etc/secrets/cookies.txt"):
