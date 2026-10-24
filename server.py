@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
 
-app = FastAPI(title="ShortsFlow AI Backend")
+app = FastAPI(title="ShortsFlow Universal AI Backend")
 
 OUTPUT_DIR = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -66,12 +66,12 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
     You are an expert viral content creator.
-    Based on the YouTube video title: "{video_title}", create high-performing metadata for Clip #{clip_index + 1}.
+    Based on the video title: "{video_title}", create high-performing metadata for Clip #{clip_index + 1}.
     Respond ONLY in strict JSON format with exactly these three keys:
     {{
         "title": "A high-CTR, curiosity-inducing Short Title (under 60 chars) with emojis",
         "description": "Short engaging 2-sentence description encouraging likes and subscribes",
-        "hashtags": "#Shorts #Viral #Trending #FYP #YouTubeShorts plus 3 niche specific tags"
+        "hashtags": "#Shorts #Viral #Trending #FYP #Reels #TikTok plus 3 niche tags"
     }}
     """
     headers = {"Content-Type": "application/json"}
@@ -122,7 +122,6 @@ def register(req: AuthReq):
     current_month = datetime.now().strftime("%Y-%m")
     user_email = req.email.lower().strip()
     
-    # Free සාමාජිකයින්ට එකම Phone එකෙන් Fake accounts සෑදීම වැළැක්වීම
     if user_email != ADMIN_EMAIL.lower():
         if req.device_id and req.device_id != "UNKNOWN":
             cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
@@ -249,28 +248,55 @@ def process_video(req: ProcessVideoReq):
     output_data = []
     
     try:
+        # YouTube, TikTok, Facebook, Instagram, Rumble ආදී සියලුම වීඩියෝ Block නොවී බාගත කිරීම
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': raw_video,
-            'overwrites': True
+            'overwrites': True,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': False,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'web_creator']
+                }
+            },
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            }
         }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.youtube_url, download=True)
             video_title = info.get('title', 'Viral Highlight')
+            total_duration = info.get('duration') or 180  # මුළු දිග තත්පර වලින්
+
+        # වීඩියෝවේ දිග අනුව ක්ලිප් එකක කාලය තීරණය කිරීම (තත්පර 30 සිට 59 දක්වා)
+        clip_duration = 30
+        
+        # වීඩියෝවේ ප්‍රමාණය අනුව ආකර්ෂණීය තැන් ගණනය කිරීම
+        # මුල් තත්පර 10 සහ අවසන් තත්පර 10 මඟහැර මැද කොටසින් සමාන පරතර ඇතිව clips තෝරාගැනීම
+        usable_duration = max(total_duration - 20, clip_duration * req.clip_count)
+        step_interval = usable_duration // (req.clip_count + 1)
 
         for i in range(req.clip_count):
-            start_sec = 20 + (i * 35)
+            start_sec = 10 + (step_interval * (i + 1))
+            # සීමාව ඉක්මවා නොයන බව තහවුරු කිරීම
+            if start_sec + clip_duration > total_duration:
+                start_sec = max(0, total_duration - clip_duration - (i * 2))
+
             clip_name = f"clip_{int(datetime.now().timestamp())}_{i+1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             if not is_vip:
-                # දකුණු පස පහළ කෙළවරින් 55% විනිවිද පෙනෙන ලා සුදු Watermark එක
+                # 9:16 Crop කර දකුණු පස පහළින් ලා සුදු Watermark එක පිහිටුවීම
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='✨ ShortsFlow AI':x=w-tw-35:y=h-th-50:fontsize=24:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0"
 
             cmd = [
-                "ffmpeg", "-y", "-ss", str(timedelta(seconds=start_sec)), "-i", raw_video, "-t", "30",
+                "ffmpeg", "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
+                "-t", str(clip_duration),
                 "-vf", vf_filter, "-c:v", "libx264", "-c:a", "aac", "-preset", "fast", final_path
             ]
             subprocess.run(cmd, check=True)
