@@ -214,47 +214,85 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- YouTube Downloader Engine (Cookies + Web Client) ---
-def download_media_stream(url: str, output_path: str):
-    # Tracking query params ඉවත් කර clean URL එකක් ලබා ගැනීම
-    clean_url = url.split("?si=")[0].split("&si=")[0].strip()
-
-    # Cookies file එක පරික්ෂා කිරීම
-    cookie_file = None
-    possible_paths = [
-        "cookies.txt",
-        "/etc/secrets/cookies.txt",
-        os.path.join(os.getcwd(), "cookies.txt")
+# --- YouTube Video ID Extraction Helper ---
+def extract_youtube_id(url: str):
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})',
+        r'(?:embed\/)([0-9A-Za-z_-]{11})',
+        r'(?:shorts\/)([0-9A-Za-z_-]{11})'
     ]
-    for p in possible_paths:
-        if os.path.exists(p) and os.path.getsize(p) > 10:
-            cookie_file = p
-            print(f"[DEBUG] Using cookies file: {p}")
-            break
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
 
+# --- Invidious & Cobalt Direct Stream Downloader Engine ---
+def download_media_stream(url: str, output_path: str):
+    clean_url = url.split("?si=")[0].split("&si=")[0].strip()
+    video_id = extract_youtube_id(clean_url)
+
+    # 1. YouTube නම්: Invidious Public API instances හරහා direct MP4 stream ලබා ගැනීම
+    if video_id:
+        invidious_instances = [
+            "https://inv.tux.pizza",
+            "https://invidious.nerdvpn.de",
+            "https://invidious.private.coffee",
+            "https://yt.drgnz.club"
+        ]
+
+        for inst in invidious_instances:
+            try:
+                api_endpoint = f"{inst}/api/v1/videos/{video_id}"
+                req = urllib.request.Request(
+                    api_endpoint,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                )
+                with urllib.request.urlopen(req, timeout=8) as res:
+                    data = json.loads(res.read().decode('utf-8'))
+                    title = data.get("title", "Viral Clip")
+                    duration = int(data.get("lengthSeconds") or 180)
+
+                    # 720p හෝ ඊට ආසන්න direct mp4 stream එකක් තෝරා ගැනීම
+                    video_formats = data.get("formatStreams", [])
+                    best_stream = None
+                    for fmt in video_formats:
+                        if fmt.get("container") == "mp4":
+                            best_stream = fmt.get("url")
+                            if fmt.get("resolution") == "720p":
+                                break
+
+                    if best_stream:
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-i", best_stream,
+                            "-c", "copy",
+                            "-t", "360",
+                            output_path
+                        ]
+                        subprocess.run(cmd, check=True, timeout=90)
+                        return title, duration
+            except Exception:
+                continue
+
+    # 2. Invidious fail වුවහොත් හෝ වෙනත් URL නම් yt-dlp (No Cookies / Web Client)
     ydl_opts = {
         'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
         'outtmpl': output_path,
         'overwrites': True,
         'quiet': False,
-        'no_warnings': False,
+        'no_warnings': True,
         'nocheckcertificate': True,
-        # Cookies නිවැරදිව වැඩ කරන්නේ web සහ mweb clients සමඟ පමණි
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'mweb'],
-                'player_skip': ['configs']
+                'player_client': ['web_safari', 'web_creator']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Sec-Fetch-Mode': 'navigate'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15'
         }
     }
-
-    if cookie_file:
-        ydl_opts['cookiefile'] = cookie_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(clean_url, download=True)
