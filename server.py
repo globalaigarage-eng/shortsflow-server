@@ -216,81 +216,51 @@ def activate_vip(req: ActivateVipReq):
 
 # --- YouTube Downloader Engine ---
 def download_media_stream(url: str, output_path: str):
-    is_youtube = ("youtube.com" in url) or ("youtu.be" in url)
+    # Cookies file එක පවතින තැන සොයාගැනීම
+    cookie_file = None
+    possible_paths = [
+        "cookies.txt",
+        "/etc/secrets/cookies.txt",
+        os.path.join(os.getcwd(), "cookies.txt")
+    ]
+    for p in possible_paths:
+        if os.path.exists(p) and os.path.getsize(p) > 10:
+            cookie_file = p
+            print(f"[DEBUG] Found cookies file at: {p}")
+            break
 
-    # 1. YouTube නම්: Cobalt Public Instances මඟින් download කර ගැනීමට ප්‍රථමයෙන් බලමු
-    if is_youtube:
-        cobalt_api_list = [
-            "https://cobalt-api.kwiatekm.tokyo",
-            "https://api.cobalt.tools",
-            "https://co.wuk.sh"
-        ]
+    if not cookie_file:
+        print("[WARNING] cookies.txt file not found or empty!")
 
-        for base_url in cobalt_api_list:
-            try:
-                payload = json.dumps({"url": url, "videoQuality": "720"}).encode('utf-8')
-                req = urllib.request.Request(
-                    f"{base_url}/",
-                    data=payload,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=12) as response:
-                    res_body = json.loads(response.read().decode('utf-8'))
-                    stream_url = res_body.get("url")
-                    if stream_url:
-                        cmd = [
-                            "ffmpeg", "-y",
-                            "-headers", "User-Agent: Mozilla/5.0\r\n",
-                            "-i", stream_url,
-                            "-c", "copy",
-                            "-t", "360",
-                            output_path
-                        ]
-                        subprocess.run(cmd, check=True, timeout=90)
-                        return "Viral YouTube Video", 180
-            except Exception:
-                continue
-
-    # 2. yt-dlp Options (iOS Client එකෙන් Bot Detection bypass කිරීම)
     ydl_opts = {
         'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
         'outtmpl': output_path,
         'overwrites': True,
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False,
+        'no_warnings': False,
         'nocheckcertificate': True,
+        'geo_bypass': True,
+        # Bot detection සම්පූර්ණයෙන්ම කඩන client combination එක
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android', 'mweb']
+                'player_client': ['tv_embedded', 'android', 'ios'],
+                'player_skip': ['webpage', 'configs']
             }
         },
         'http_headers': {
-            'User-Agent': 'com.google.ios.youtube/19.29.1 (iPhone14,5; U; CPU iOS 17_5_1 like Mac OS X)'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9'
         }
     }
 
-    # Render Secret Files හෝ local files වලින් cookies සෙවීම
-    possible_cookie_paths = [
-        "cookies.txt",
-        "/etc/secrets/cookies.txt"
-    ]
-    for c_path in possible_cookie_paths:
-        if os.path.exists(c_path):
-            ydl_opts['cookiefile'] = c_path
-            break
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'Viral Clip')
-            duration = int(info.get('duration') or 180)
-            return title, duration
-    except Exception as err:
-        raise Exception("YouTube වෙතින් වීඩියෝව ලබාගත නොහැකි විය. කරුණාකර cookies.txt එකතු කරන්න.")
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        title = info.get('title', 'Viral Clip')
+        duration = int(info.get('duration') or 180)
+        return title, duration
 
 @app.post("/process-video")
 def process_video(req: ProcessVideoReq):
