@@ -23,6 +23,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 otp_storage = {}
 
+# --- Database Setup ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -58,6 +59,7 @@ def init_db():
 
 init_db()
 
+# --- Gemini Metadata Generator ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
     fallback_title = f"🔥 {clean_title} - Highlights"
@@ -71,7 +73,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
-    Create a viral Short Title (under 45 chars) with an emoji for: "{video_title}".
+    Create a viral Title (under 45 chars) with an emoji for: "{video_title}".
     Do NOT include Part 1 or Clip 1.
     Respond ONLY in strict JSON:
     {{
@@ -119,6 +121,7 @@ class ProcessVideoReq(BaseModel):
     youtube_url: str
     clip_count: int
 
+# --- Auth Endpoints ---
 @app.post("/auth/register")
 def register(req: AuthReq):
     conn = sqlite3.connect("shortsflow.db")
@@ -212,8 +215,54 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- Universal Downloader Engine with Cookies Support ---
-def download_media(url: str, output_path: str):
+# --- Bulletproof Media Downloader Engine ---
+def download_media_stream(url: str, output_path: str):
+    # YouTube Link හඳුනාගැනීම
+    yt_id = None
+    if "youtu.be/" in url:
+        yt_id = url.split("youtu.be/")[1].split("?")[0].split("&")[0]
+    elif "watch?v=" in url:
+        m = re.search(r"v=([a-zA-Z0-9_-]{11})", url)
+        if m:
+            yt_id = m.group(1)
+
+    # 1. YouTube වීඩියෝවක් නම්: Invidious/Piped Public Gateway එකකින් Direct MP4 එක FFmpeg හරහා බාගත කිරීම
+    if yt_id:
+        gateways = [
+            f"https://pipedapi.kavin.rocks/streams/{yt_id}",
+            f"https://api.piped.private.coffee/streams/{yt_id}",
+            f"https://vid.priv.au/api/v1/videos/{yt_id}",
+            f"https://inv.nadeko.net/api/v1/videos/{yt_id}"
+        ]
+        for gw in gateways:
+            try:
+                req = urllib.request.Request(gw, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req, timeout=9) as res:
+                    data = json.loads(res.read().decode('utf-8'))
+                    title = data.get("title", "Viral Highlight")
+                    duration = int(data.get("duration", data.get("lengthSeconds", 180)))
+                    
+                    stream_url = None
+                    if "videoStreams" in data:
+                        for s in data["videoStreams"]:
+                            if s.get("format") == "MPEG_4" or "mp4" in s.get("mimeType", ""):
+                                stream_url = s.get("url")
+                                break
+                    elif "formatStreams" in data:
+                        for s in data["formatStreams"]:
+                            if "mp4" in s.get("type", ""):
+                                stream_url = s.get("url")
+                                break
+
+                    if stream_url:
+                        # FFmpeg එකෙන් සෘජුවම stream එක download කරගැනීම
+                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "360", output_path]
+                        subprocess.run(cmd, check=True)
+                        return title, duration
+            except Exception:
+                continue
+
+    # 2. Facebook, TikTok, Instagram හෝ අනෙක් සියලුම සේවා සඳහා Direct yt-dlp
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -222,11 +271,11 @@ def download_media(url: str, output_path: str):
         'no_warnings': True,
         'nocheckcertificate': True,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
     }
-
-    # cookies.txt ගොනුව තිබේ නම් එය සෘජුවම අමුණා YouTube Bot Check සම්පූර්ණයෙන්ම මඟහැරීම
+    
+    # cookies.txt තිබේ නම් භාවිතා කිරීම
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = "cookies.txt"
 
@@ -262,7 +311,7 @@ def process_video(req: ProcessVideoReq):
     output_data = []
 
     try:
-        video_title, total_duration = download_media(req.youtube_url, raw_video)
+        video_title, total_duration = download_media_stream(req.youtube_url, raw_video)
         
         clip_duration = 30
         usable_duration = max(total_duration - 15, clip_duration * req.clip_count)
