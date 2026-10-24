@@ -24,7 +24,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 otp_storage = {}
 
-# --- Database Setup (Clips Tracking & Device Binding) ---
 def init_db():
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -60,7 +59,6 @@ def init_db():
 
 init_db()
 
-# --- Gemini Metadata Generator ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
     fallback_title = f"🔥 {clean_title} - Epic Moment"
@@ -68,19 +66,19 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Check out this viral moment from {clean_title}! Subscribe for more.",
+            "description": f"Must watch highlight from {clean_title}! Share and follow for more.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
-    Create viral metadata for this video: "{video_title}".
-    DO NOT use "Part 1" or "Clip 1". Create a high-CTR, dramatic title.
+    Create a viral Title (under 45 chars) with an emoji for: "{video_title}".
+    Do NOT include Part 1 or Clip 1.
     Respond ONLY in strict JSON:
     {{
-        "title": "Engaging Short Title with emoji (under 50 chars)",
-        "description": "Engaging 2-sentence description driving comments",
-        "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow plus 3 related tags"
+        "title": "Dramatic Short Title",
+        "description": "Short engaging 2-sentence description",
+        "hashtags": "#Shorts #Viral #Trending #FYP"
     }}
     """
     headers = {"Content-Type": "application/json"}
@@ -88,7 +86,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=8) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
             clean_text = raw_text.replace("```json", "").replace("```", "").strip()
@@ -96,11 +94,10 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     except Exception:
         return {
             "title": fallback_title,
-            "description": f"Unbelievable highlight from {clean_title}! Watch till the end.",
-            "hashtags": "#Shorts #Viral #Trending #FYP #ShortsFlow"
+            "description": f"Unbelievable clip from {clean_title}!",
+            "hashtags": "#Shorts #Viral #Trending #FYP"
         }
 
-# --- Request Models ---
 class AuthReq(BaseModel):
     email: str
     password: str
@@ -123,7 +120,6 @@ class ProcessVideoReq(BaseModel):
     youtube_url: str
     clip_count: int
 
-# --- API Endpoints ---
 @app.post("/auth/register")
 def register(req: AuthReq):
     conn = sqlite3.connect("shortsflow.db")
@@ -131,15 +127,11 @@ def register(req: AuthReq):
     current_month = datetime.now().strftime("%Y-%m")
     user_email = req.email.lower().strip()
     
-    if user_email != ADMIN_EMAIL.lower():
-        if req.device_id and req.device_id != "UNKNOWN":
-            cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
-            if cursor.fetchone():
-                conn.close()
-                raise HTTPException(
-                    status_code=403, 
-                    detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත! එක Phone එකකට එක Free ගිණුමකි."
-                )
+    if user_email != ADMIN_EMAIL.lower() and req.device_id and req.device_id != "UNKNOWN":
+        cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
+        if cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=403, detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!")
 
     try:
         cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?, ?)", 
@@ -164,9 +156,8 @@ def login(req: AuthReq):
         raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
     
     email, is_vip, vip_expiry, clips_used = user
-    if is_vip and vip_expiry:
-        if datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
-            is_vip = 0
+    if is_vip and vip_expiry and datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
+        is_vip = 0
             
     return {
         "status": "success",
@@ -185,15 +176,11 @@ def forgot_password(req: ForgotReq):
     conn.close()
 
     if not user:
-        raise HTTPException(status_code=404, detail="මෙම Email ලිපිනය සහිත ගිණුමක් හමු නොවීය.")
+        raise HTTPException(status_code=404, detail="Email ලිපිනය හමු නොවීය.")
 
     otp = str(random.randint(100000, 999999))
     otp_storage[req.email.lower().strip()] = otp
-
-    return {
-        "status": "success", 
-        "message": "OTP කේතය ඔබගේ Email එකට යවන ලදී (Demo OTP: " + otp + ")"
-    }
+    return {"status": "success", "message": "OTP කේතය Email වෙත යවන ලදී (Demo: " + otp + ")"}
 
 @app.post("/auth/reset-password")
 def reset_password(req: ResetReq):
@@ -201,7 +188,7 @@ def reset_password(req: ResetReq):
     stored_otp = otp_storage.get(target_email)
 
     if not stored_otp or stored_otp != req.otp.strip():
-        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි හෝ කල් ඉකුත් වී ඇත.")
+        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි.")
 
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -210,7 +197,7 @@ def reset_password(req: ResetReq):
     conn.close()
 
     del otp_storage[target_email]
-    return {"status": "success", "message": "Password එක සාර්ථකව වෙනස් කරන ලදී! දැන් Login විය හැක."}
+    return {"status": "success", "message": "Password යාවත්කාලීන විය!"}
 
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
@@ -222,51 +209,45 @@ def activate_vip(req: ActivateVipReq):
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET is_vip = 1, vip_expiry = ? WHERE email = ?", 
                    (expiry, req.target_user_email.lower().strip()))
-    changes = conn.total_changes
     conn.commit()
     conn.close()
+    return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
+
+# --- Bulletproof Video Downloader Pipeline ---
+def download_stream(url: str, output_path: str):
+    # YouTube Link හඳුනාගැනීම
+    yt_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
     
-    if changes == 0:
-        raise HTTPException(status_code=404, detail="User හමු නොවීය.")
-    return {"status": "success", "message": f"{req.target_user_email} සඳහා VIP දින 30ක් සක්‍රීය විය!"}
-
-# --- YouTube Bot-Block Bypass Downloader Engine ---
-def download_media_stream(url: str, output_path: str):
-    # 1. YouTube Link එකක්දැයි හඳුනා ගැනීම
-    is_youtube = ("youtube.com" in url) or ("youtu.be" in url)
-
-    if is_youtube:
-        # YouTube Bot-Block එක bypass කරන Global Proxy Endpoints
-        api_gateways = [
-            {"endpoint": "https://api.cobalt.tools/api/json", "payload": {"url": url, "vQuality": "720"}},
-            {"endpoint": "https://cobalt-api.kwiatekm.tokyo/api/json", "payload": {"url": url, "vQuality": "720"}},
-            {"endpoint": "https://co.wuk.sh/api/json", "payload": {"url": url, "vQuality": "720"}}
+    if yt_match:
+        video_id = yt_match.group(1)
+        # YouTube Bot-Block මඟහැරීම සඳහා Invidious Public Gateways
+        instances = [
+            f"https://api.invidious.io/api/v1/videos/{video_id}",
+            f"https://vid.priv.au/api/v1/videos/{video_id}",
+            f"https://inv.nadeko.net/api/v1/videos/{video_id}"
         ]
-        
-        for gw in api_gateways:
+        for inst in instances:
             try:
-                post_data = json.dumps(gw["payload"]).encode('utf-8')
-                req = urllib.request.Request(
-                    gw["endpoint"],
-                    data=post_data,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "User-Agent": "ShortsFlowEngine/2.0"
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=12) as response:
-                    res_body = json.loads(response.read().decode('utf-8'))
-                    stream_url = res_body.get("url")
+                req = urllib.request.Request(inst, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as res:
+                    data = json.loads(res.read().decode("utf-8"))
+                    title = data.get("title", "Viral Clip")
+                    duration = int(data.get("lengthSeconds", 180))
+                    
+                    stream_url = None
+                    for stream in data.get("formatStreams", []):
+                        if "video/mp4" in stream.get("type", ""):
+                            stream_url = stream.get("url")
+                            break
+                    
                     if stream_url:
-                        # Direct MP4 stream එක FFmpeg මඟින් බාගත කිරීම
-                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "420", output_path]
+                        cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "360", output_path]
                         subprocess.run(cmd, check=True)
-                        return "Viral YouTube Highlight", 200
+                        return title, duration
             except Exception:
                 continue
 
-    # 2. Facebook, TikTok, Instagram, Rumble හෝ YouTube Fallback සඳහා yt-dlp
+    # Facebook, TikTok, Instagram, Rumble හෝ Fallback yt-dlp ක්‍රමය
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -274,13 +255,18 @@ def download_media_stream(url: str, output_path: str):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        title = info.get('title', 'Viral Highlight')
+        title = info.get('title', 'Viral Clip')
         duration = int(info.get('duration') or 180)
         return title, duration
 
@@ -300,19 +286,19 @@ def process_video(req: ProcessVideoReq):
     max_per_link = 10 if is_vip else 2
     if req.clip_count < 1 or req.clip_count > max_per_link:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"ඔබට එකවර සෑදිය හැක්කේ වීඩියෝ 1 සිට {max_per_link} දක්වා ප්‍රමාණයකි.")
+        raise HTTPException(status_code=403, detail=f"වීඩියෝ 1 සිට {max_per_link} දක්වා තෝරන්න.")
 
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (භාවිත කර ඇත: {clips_used}). Unlimited සඳහා VIP ලබාගන්න.")
+        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
 
     raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
     output_data = []
 
     try:
-        video_title, total_duration = download_media_stream(req.youtube_url, raw_video)
+        video_title, total_duration = download_stream(req.youtube_url, raw_video)
         
-        clip_duration = 32
+        clip_duration = 30
         usable_duration = max(total_duration - 15, clip_duration * req.clip_count)
         step_interval = usable_duration // (req.clip_count + 1)
 
@@ -327,26 +313,25 @@ def process_video(req: ProcessVideoReq):
             meta = generate_metadata_with_gemini(video_title, i)
             title_text = meta.get("title", "").replace("'", "").replace(":", "")
 
-            # Ultra 1080p Blur Background Filter
+            # Render RAM සීමාව රැකගැනීමට සහ පැහැදිලි 9:16 layout එකක් සැකසීමට
             base_filter = (
-                "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:10[bg];"
-                "[0:v]scale=1080:-1[fg];"
+                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
+                "[0:v]scale=720:-1[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2[combined];"
-                f"[combined]drawtext=text='{title_text[:36]}':fontcolor=yellow:fontsize=46:box=1:boxcolor=black@0.65:boxborderw=14:x=(w-text_w)/2:y=180"
+                f"[combined]drawtext=text='{title_text[:35]}':fontcolor=yellow:fontsize=36:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=120"
             )
 
             if not is_vip:
-                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-40:y=h-th-60:fontsize=28:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
+                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = base_filter
 
-            # Clear Bitrate Audio/Video Encoding
             cmd = [
                 "ffmpeg", "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
                 "-t", str(clip_duration),
                 "-filter_complex", vf_filter,
-                "-c:v", "libx264", "-crf", "22", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-threads", "2",
+                "-c:a", "aac", "-b:a", "128k",
                 final_path
             ]
             subprocess.run(cmd, check=True)
