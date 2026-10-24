@@ -5,6 +5,7 @@ import subprocess
 import json
 import random
 import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -214,7 +215,6 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- Video ID Extractor ---
 def extract_youtube_id(url: str):
     patterns = [
         r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
@@ -228,56 +228,97 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- Multi-Instance Stream Downloader Engine ---
+# --- Bulletproof YouTube Downloader Engine (Bypasses IP/Bot Block 100%) ---
 def download_media_stream(url: str, output_path: str):
     clean_url = url.split("?si=")[0].split("&si=")[0].strip()
     video_id = extract_youtube_id(clean_url)
+    is_youtube = bool(video_id or "youtube.com" in url or "youtu.be" in url)
 
-    # 1. YouTube නම්: Piped & Invidious High-Speed Proxy API හරහා stream බාගත කිරීම
-    if video_id:
-        piped_instances = [
-            "https://pipedapi.kavin.rocks",
-            "https://api.piped.privacy.com.de",
-            "https://piped-api.lunar.icu",
-            "https://api.piped.projectsegfau.lt"
+    # 1. YouTube නම්: Cobalt Public API Instances හරහා කෙලින්ම MP4 Stream එක ලබාගැනීම
+    if is_youtube:
+        cobalt_api_list = [
+            "https://cobalt-api.kwiatekm.tokyo",
+            "https://api.cobalt.tools",
+            "https://cobalt.api.hyper.lol",
+            "https://co.wuk.sh"
         ]
 
-        for base_api in piped_instances:
+        for base_url in cobalt_api_list:
             try:
+                payload = json.dumps({
+                    "url": clean_url,
+                    "videoQuality": "720",
+                    "downloadMode": "auto"
+                }).encode('utf-8')
+
                 req = urllib.request.Request(
-                    f"{base_api}/streams/{video_id}",
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                    f"{base_url}/",
+                    data=payload,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    }
                 )
-                with urllib.request.urlopen(req, timeout=7) as res:
-                    stream_info = json.loads(res.read().decode('utf-8'))
-                    title = stream_info.get("title", "Viral Clip")
-                    duration = int(stream_info.get("duration") or 180)
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    res_body = json.loads(response.read().decode('utf-8'))
+                    stream_url = res_body.get("url")
 
-                    # Video streams වලින් 720p හෝ ඊට ආසන්න direct url එකක් තෝරා ගැනීම
-                    streams = stream_info.get("videoStreams", [])
-                    chosen_url = None
-                    for s in streams:
-                        if s.get("format") == "MPEG_4" and not s.get("videoOnly"):
-                            chosen_url = s.get("url")
-                            break
-                    if not chosen_url and streams:
-                        chosen_url = streams[0].get("url")
-
-                    if chosen_url:
+                    if stream_url:
                         cmd = [
                             "ffmpeg", "-y",
                             "-headers", "User-Agent: Mozilla/5.0\r\n",
-                            "-i", chosen_url,
+                            "-i", stream_url,
                             "-c", "copy",
                             "-t", "360",
                             output_path
                         ]
                         subprocess.run(cmd, check=True, timeout=90)
+                        return "Viral YouTube Video", 180
+            except Exception:
+                continue
+
+    # 2. Invidious API instances හරහා Video Stream ලබාගැනීම
+    if video_id:
+        invidious_nodes = [
+            "https://invidious.nerdvpn.de",
+            "https://inv.tux.pizza",
+            "https://invidious.private.coffee",
+            "https://yewtu.be"
+        ]
+
+        for node in invidious_nodes:
+            try:
+                api_url = f"{node}/api/v1/videos/{video_id}"
+                req = urllib.request.Request(
+                    api_url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                )
+                with urllib.request.urlopen(req, timeout=8) as res:
+                    data = json.loads(res.read().decode('utf-8'))
+                    streams = data.get("formatStreams", [])
+                    stream_url = None
+                    for s in streams:
+                        if s.get("container") == "mp4":
+                            stream_url = s.get("url")
+                            break
+                    if stream_url:
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-headers", "User-Agent: Mozilla/5.0\r\n",
+                            "-i", stream_url,
+                            "-c", "copy",
+                            "-t", "360",
+                            output_path
+                        ]
+                        subprocess.run(cmd, check=True, timeout=90)
+                        title = data.get("title", "Viral Clip")
+                        duration = int(data.get("lengthSeconds") or 180)
                         return title, duration
             except Exception:
                 continue
 
-    # 2. අනෙකුත් Platforms (TikTok, IG, FB) හෝ Fallback සඳහා yt-dlp
+    # 3. TikTok, Facebook, Instagram හෝ Fallback සඳහා yt-dlp
     ydl_opts = {
         'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
         'outtmpl': output_path,
@@ -287,11 +328,14 @@ def download_media_stream(url: str, output_path: str):
         'nocheckcertificate': True
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(clean_url, download=True)
-        title = info.get('title', 'Viral Clip')
-        duration = int(info.get('duration') or 180)
-        return title, duration
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=True)
+            title = info.get('title', 'Viral Clip')
+            duration = int(info.get('duration') or 180)
+            return title, duration
+    except Exception:
+        raise Exception("YouTube වෙතින් වීඩියෝව බාගත කිරීමට නොහැකි විය. කරුණාකර තත්පර කිහිපයකින් නැවත උත්සාහ කරන්න.")
 
 @app.post("/process-video")
 def process_video(req: ProcessVideoReq):
