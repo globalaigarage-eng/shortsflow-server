@@ -214,11 +214,11 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- YouTube Bot-Block 100% මඟහරින Downloader Engine ---
+# --- YouTube Bot-Block Bypass Downloader Engine ---
 def download_media_stream(url: str, output_path: str):
     is_youtube = ("youtube.com" in url) or ("youtu.be" in url)
 
-    # 1. YouTube නම්: කිසිදු ආකාරයකින් yt-dlp මඟින් YouTube වෙත කෙලින්ම request යවන්නේ නැත
+    # 1. Cobalt API මඟින් YouTube බාගත කිරීමට ප්‍රථමයෙන් උත්සාහ කිරීම
     if is_youtube:
         cobalt_api_list = [
             "https://api.cobalt.tools",
@@ -235,21 +235,21 @@ def download_media_stream(url: str, output_path: str):
                     headers={
                         "Accept": "application/json",
                         "Content-Type": "application/json",
-                        "User-Agent": "ShortsFlowApp/3.0"
+                        "User-Agent": "Mozilla/5.0"
                     }
                 )
-                with urllib.request.urlopen(req, timeout=12) as response:
+                with urllib.request.urlopen(req, timeout=10) as response:
                     res_body = json.loads(response.read().decode('utf-8'))
                     stream_url = res_body.get("url")
                     if stream_url:
-                        # FFmpeg මඟින් stream එක කෙලින්ම MP4 ලෙස download කිරීම
                         cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy", "-t", "400", output_path]
                         subprocess.run(cmd, check=True)
                         return "Viral YouTube Video", 180
             except Exception:
                 continue
 
-    # 2. Facebook, TikTok, Instagram, Rumble (හෝ Cookies ඇත්නම් YouTube) සඳහා yt-dlp
+    # 2. Cobalt අසාර්ථක වුවහොත් හෝ වෙනත් Platform එකක් නම් yt-dlp ක්‍රියාත්මක කිරීම
+    # YouTube bot block එක වැළැක්වීමට android client හා cookies යොදා ගැනීම
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -257,12 +257,17 @@ def download_media_stream(url: str, output_path: str):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip'
         }
     }
 
-    # Environment හෝ local directory එකේ cookies.txt තිබේදැයි බැලීම
+    # Cookies file තිබේදැයි පරීක්ෂා කර එක් කිරීම
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = "cookies.txt"
     elif os.path.exists("/etc/secrets/cookies.txt"):
