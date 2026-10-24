@@ -247,41 +247,64 @@ def process_video(req: ProcessVideoReq):
     raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
     output_data = []
     
-    try:
-        # YouTube, TikTok, Facebook, Instagram, Rumble ආදී සියලුම වීඩියෝ Block නොවී බාගත කිරීම
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'outtmpl': raw_video,
-            'overwrites': True,
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': False,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios', 'web_creator']
-                }
-            },
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-            }
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.youtube_url, download=True)
-            video_title = info.get('title', 'Viral Highlight')
-            total_duration = info.get('duration') or 180  # මුළු දිග තත්පර වලින්
+    # YouTube Bot Block bypass කිරීම සඳහා බහු Client Profiles (TV Embedded, iOS, Android, MWeb)
+    client_profiles = [
+        (['tv_embedded'], 'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV) AppleWebKit/538.1 (KHTML, like Gecko) TV Safari/538.1'),
+        (['ios'], 'com.google.ios.youtube/19.12.3 (iPhone14,3; U; CPU iOS 17_4 like Mac OS X; en_US)'),
+        (['android'], 'com.google.android.youtube/19.11.38 (Linux; U; Android 14; en_US)'),
+        (['mweb'], 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1')
+    ]
 
-        # වීඩියෝවේ දිග අනුව ක්ලිප් එකක කාලය තීරණය කිරීම (තත්පර 30 සිට 59 දක්වා)
+    download_success = False
+    video_title = "Viral Highlight"
+    total_duration = 180
+
+    for clients, uagent in client_profiles:
+        try:
+            ydl_opts = {
+                'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
+                'outtmpl': raw_video,
+                'overwrites': True,
+                'quiet': True,
+                'no_warnings': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': clients,
+                        'player_skip': ['webpage', 'configs']
+                    }
+                },
+                'http_headers': {
+                    'User-Agent': uagent
+                }
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(req.youtube_url, download=True)
+                video_title = info.get('title', 'Viral Highlight')
+                total_duration = int(info.get('duration') or 180)
+                download_success = True
+                break
+        except Exception:
+            if os.path.exists(raw_video):
+                try:
+                    os.remove(raw_video)
+                except Exception:
+                    pass
+            continue
+
+    if not download_success:
+        conn.close()
+        raise HTTPException(
+            status_code=500, 
+            detail="YouTube Bot-Detection මඟින් බාගත කිරීම අවහිර කරන ලදී. කරුණාකර වෙනත් YouTube Link එකක් හෝ Facebook/TikTok/Instagram link එකක් භාවිත කරන්න."
+        )
+
+    try:
         clip_duration = 30
-        
-        # වීඩියෝවේ ප්‍රමාණය අනුව ආකර්ෂණීය තැන් ගණනය කිරීම
-        # මුල් තත්පර 10 සහ අවසන් තත්පර 10 මඟහැර මැද කොටසින් සමාන පරතර ඇතිව clips තෝරාගැනීම
         usable_duration = max(total_duration - 20, clip_duration * req.clip_count)
         step_interval = usable_duration // (req.clip_count + 1)
 
         for i in range(req.clip_count):
             start_sec = 10 + (step_interval * (i + 1))
-            # සීමාව ඉක්මවා නොයන බව තහවුරු කිරීම
             if start_sec + clip_duration > total_duration:
                 start_sec = max(0, total_duration - clip_duration - (i * 2))
 
@@ -289,7 +312,7 @@ def process_video(req: ProcessVideoReq):
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             if not is_vip:
-                # 9:16 Crop කර දකුණු පස පහළින් ලා සුදු Watermark එක පිහිටුවීම
+                # දකුණු පස පහළ කෙළවරින් 55% විනිවිද පෙනෙන ලා සුදු Watermark එක
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0,drawtext=text='✨ ShortsFlow AI':x=w-tw-35:y=h-th-50:fontsize=24:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = "crop=ih*(9/16):ih:(iw-ow)/2:0"
