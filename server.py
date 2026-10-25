@@ -214,7 +214,6 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- Video ID Extractor ---
 def extract_youtube_id(url: str):
     patterns = [
         r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})'
@@ -225,42 +224,75 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- YouTube & Video Downloader Engine ---
+# --- YouTube Direct Stream Extractor (Zero Bot Blocks) ---
 def download_media_stream(url: str, output_path: str):
     clean_url = url.split("?si=")[0].split("&si=")[0].strip()
     video_id = extract_youtube_id(clean_url)
     
+    # 1. YouTube නම්: yt-dlp මඟින් YouTube වෙත කෙලින්ම request යැවීම සම්පූර්ණයෙන්ම වළක්වා proxy streams භාවිත කිරීම
     if video_id:
-        target_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Datacenter IP block සහ Bot Block මඟහරින Android Testsuite client engine
-        ydl_opts = {
-            'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
-            'outtmpl': output_path,
-            'overwrites': True,
-            'quiet': False,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'socket_timeout': 30,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android_testsuite', 'android_creator'],
-                    'player_skip': ['webpage', 'configs']
-                }
-            },
-            'http_headers': {
-                'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 12; Pixel 6 Build/SQ3A.220705.004)'
-            }
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target_url, download=True)
-            title = info.get('title', 'Viral Clip')
-            duration = int(info.get('duration') or 180)
-            return title, duration
+        target_video = f"https://www.youtube.com/watch?v={video_id}"
 
-    # FB, TikTok, IG සඳහා
-    generic_opts = {
+        # Cobalt APIs
+        cobalt_nodes = [
+            "https://api.cobalt.tools",
+            "https://cobalt-api.kwiatekm.tokyo",
+            "https://co.wuk.sh"
+        ]
+        for c_api in cobalt_nodes:
+            try:
+                post_body = json.dumps({"url": target_video, "videoQuality": "720"}).encode('utf-8')
+                req = urllib.request.Request(
+                    f"{c_api}/",
+                    data=post_body,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "User-Agent": "Mozilla/5.0"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=9) as res:
+                    body = json.loads(res.read().decode('utf-8'))
+                    s_url = body.get("url")
+                    if s_url:
+                        cmd = ["ffmpeg", "-y", "-i", s_url, "-c", "copy", "-t", "360", output_path]
+                        subprocess.run(cmd, check=True, timeout=90)
+                        return "Viral YouTube Video", 180
+            except Exception:
+                continue
+
+        # Invidious Instances
+        invidious_nodes = [
+            "https://invidious.nerdvpn.de",
+            "https://inv.tux.pizza",
+            "https://invidious.private.coffee",
+            "https://yewtu.be"
+        ]
+        for node in invidious_nodes:
+            try:
+                req = urllib.request.Request(
+                    f"{node}/api/v1/videos/{video_id}",
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=7) as res:
+                    data = json.loads(res.read().decode('utf-8'))
+                    title = data.get("title", "Viral Clip")
+                    duration = int(data.get("lengthSeconds") or 180)
+                    for fmt in data.get("formatStreams", []):
+                        if fmt.get("container") == "mp4":
+                            stream_link = fmt.get("url")
+                            if stream_link:
+                                cmd = ["ffmpeg", "-y", "-i", stream_link, "-c", "copy", "-t", "360", output_path]
+                                subprocess.run(cmd, check=True, timeout=90)
+                                return title, duration
+            except Exception:
+                continue
+
+        # yt-dlp කිසිසේත්ම call නොකර අසමත් වූ බව පෙන්වීම (yt-dlp call කළහොත් IP block එකට හසුවේ)
+        raise Exception("YouTube වෙතින් වීඩියෝව බාගත කිරීමට නොහැකි විය. කරුණාකර වෙනත් YouTube Link එකක් ලබා දෙන්න.")
+
+    # TikTok, Facebook, Reels සඳහා පමණක් yt-dlp
+    ydl_opts = {
         'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
         'outtmpl': output_path,
         'overwrites': True,
@@ -268,7 +300,7 @@ def download_media_stream(url: str, output_path: str):
         'no_warnings': True,
         'nocheckcertificate': True
     }
-    with yt_dlp.YoutubeDL(generic_opts) as ydl:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(clean_url, download=True)
         title = info.get('title', 'Viral Clip')
         duration = int(info.get('duration') or 180)
