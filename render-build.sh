@@ -6,6 +6,7 @@ import shutil
 import json
 import random
 import urllib.request
+import math
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -53,7 +54,7 @@ if not (os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)):
 
 @app.get("/")
 def root():
-    return {"service": "ShortsFlow AI Backend", "status": "online", "health": "/health", "docs": "/docs"}
+    return {"service": "ShortsFlow AI Backend", "status": "online", "health": "/health"}
 
 @app.get("/health")
 def health():
@@ -89,54 +90,31 @@ def init_db():
             device_id TEXT
         )
     """)
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN monthly_clips_used INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    if ADMIN_EMAIL and ADMIN_PASSWORD:
-        cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(ADMIN_EMAIL),))
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO users (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
-                "VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')",
-                (normalize_email(ADMIN_EMAIL), ADMIN_PASSWORD, datetime.now().strftime("%Y-%m"))
-            )
-        else:
-            cursor.execute(
-                "UPDATE users SET password = ?, is_vip = 1, vip_expiry = '2099-12-31' "
-                "WHERE LOWER(TRIM(email)) = ?",
-                (ADMIN_PASSWORD, normalize_email(ADMIN_EMAIL))
-            )
-    
     conn.commit()
     conn.close()
 
 init_db()
 
-def generate_metadata_with_gemini(video_title: str, clip_index: int):
+def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
-    fallback_title = f"🔥 {clean_title} (Must Watch)"
+    suffix = f" (Part {part_num})" if total_parts > 1 else ""
+    fallback_title = f"🔥 {clean_title}{suffix}"
 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Must watch viral clip from {clean_title}! Like and follow for more.",
+            "description": f"Highlight clip from {clean_title}! Share, like and follow for more.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
-    Create a viral Title (under 45 chars) with an emoji for: "{video_title}".
-    Do NOT include Part 1 or Clip 1.
+    Video topic: "{video_title}". Part {part_num} of {total_parts}.
+    Create a viral Title (under 45 chars) with an emoji ending with "{suffix}".
     Respond ONLY in strict JSON:
     {{
-        "title": "Dramatic Title",
-        "description": "Engaging 2-sentence description",
+        "title": "Title with emoji{suffix}",
+        "description": "Engaging 2-sentence description summarizing this part",
         "hashtags": "#Shorts #Viral #Trending #FYP"
     }}
     """
@@ -177,7 +155,7 @@ class ActivateVipReq(BaseModel):
 class ProcessVideoReq(BaseModel):
     email: str
     youtube_url: str
-    clip_count: int
+    clip_count: int = 1
 
 @app.post("/auth/register")
 def register(req: AuthReq):
@@ -285,7 +263,6 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- Multi-Source Stream Downloader ---
 def download_media_stream(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
@@ -293,7 +270,6 @@ def download_media_stream(url: str, output_path: str):
 
     video_id = extract_youtube_id(clean_url)
 
-    # 1. YouTube නම්: Piped/Invidious proxy stream fetching
     if video_id:
         stream_resolvers = [
             f"https://api.piped.private.coffee/streams/{video_id}",
@@ -307,7 +283,7 @@ def download_media_stream(url: str, output_path: str):
                 req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=7) as res:
                     data = json.loads(res.read().decode('utf-8'))
-                    title = data.get("title", "Viral Short")
+                    title = data.get("title", "Viral Video")
                     duration = int(data.get("duration", data.get("lengthSeconds", 60)))
 
                     direct_stream_url = None
@@ -323,13 +299,12 @@ def download_media_stream(url: str, output_path: str):
                                 break
 
                     if direct_stream_url:
-                        cmd = [FFMPEG_BIN, "-y", "-i", direct_stream_url, "-c", "copy", "-t", "300", output_path]
-                        subprocess.run(cmd, check=True, timeout=90)
+                        cmd = [FFMPEG_BIN, "-y", "-i", direct_stream_url, "-c", "copy", output_path]
+                        subprocess.run(cmd, check=True, timeout=180)
                         return title, duration
             except Exception:
                 continue
 
-    # 2. Facebook, TikTok, Instagram, Rumble (Cloud-Friendly yt-dlp)
     target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
 
     ydl_opts = {
@@ -396,12 +371,7 @@ def process_video(req: ProcessVideoReq):
 
     is_vip, clips_used = user[0], user[1] or 0
 
-    max_per_link = 10 if is_vip else 2
-    if req.clip_count < 1 or req.clip_count > max_per_link:
-        conn.close()
-        raise HTTPException(status_code=403, detail=f"වීඩියෝ 1 සිට {max_per_link} දක්වා තෝරන්න.")
-
-    if not is_vip and (clips_used + req.clip_count) > 30:
+    if not is_vip and clips_used >= 30:
         conn.close()
         raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! VIP ලබාගන්න.")
 
@@ -411,20 +381,26 @@ def process_video(req: ProcessVideoReq):
     try:
         video_title, total_duration = download_media_stream(req.youtube_url, raw_video)
         
-        # Shorts & Reels සඳහා නියම කාල පරාසය (තත්පර 15-45)
-        clip_duration = min(35, max(15, total_duration // req.clip_count))
-        usable_duration = max(total_duration - 5, clip_duration * req.clip_count)
-        step_interval = usable_duration // (req.clip_count + 1)
+        # විනාඩි 3 (තත්පර 180) බැගින් කොටස් ගණන ගණනය කිරීම
+        PART_DURATION = 180
+        total_parts = math.ceil(total_duration / PART_DURATION)
+        if total_parts < 1:
+            total_parts = 1
 
-        for i in range(req.clip_count):
-            start_sec = 2 + (step_interval * (i + 1))
-            if start_sec + clip_duration > total_duration:
-                start_sec = max(0, total_duration - clip_duration)
+        # Free අයට උපරිම කොටස් 3 (විනාඩි 9 දක්වා), VIP අයට සම්පූර්ණ වීඩියෝව
+        if not is_vip and total_parts > 3:
+            total_parts = 3
 
-            clip_name = f"clip_{int(datetime.now().timestamp())}_{i+1}.mp4"
+        for i in range(total_parts):
+            start_sec = i * PART_DURATION
+            current_clip_len = min(PART_DURATION, total_duration - start_sec)
+            if current_clip_len <= 5:
+                break
+
+            clip_name = f"part_{int(datetime.now().timestamp())}_{i+1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            meta = generate_metadata_with_gemini(video_title, i)
+            meta = generate_metadata_with_gemini(video_title, i + 1, total_parts)
             title_text = (
                 meta.get("title", "")
                 .replace("\\", "\\\\")
@@ -438,11 +414,7 @@ def process_video(req: ProcessVideoReq):
                 .replace("\\n", " ")
             )
 
-            # --- Anti-Copyright AI Bypass Filter Complex ---
-            # 1. Video 9:16 Reframe with Blurred Background
-            # 2. Subtle Color Tuning (eq=brightness=0.03:saturation=1.12:contrast=1.05) - Content ID bypass
-            # 3. Micro Speed Adjust (setpts=0.97*PTS) - Video Hash bypass
-            # 4. Audio Pitch & Speed shift (atempo=1.03) - Audio Fingerprint bypass
+            # Anti-Copyright AI Bypass Filter
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
                 "[0:v]scale=720:-1,eq=brightness=0.03:saturation=1.12:contrast=1.05,setpts=0.97*PTS[fg];"
@@ -457,15 +429,15 @@ def process_video(req: ProcessVideoReq):
 
             cmd = [
                 FFMPEG_BIN, "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
-                "-t", str(clip_duration),
+                "-t", str(int(current_clip_len)),
                 "-filter_complex", vf_filter,
                 "-af", "atempo=1.03,volume=1.05",
-                "-c:v", "libx264", "-crf", "22", "-preset", "veryfast", "-threads", "2",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-threads", "2",
+                "-c:a", "aac", "-b:a", "128k",
                 "-map_metadata", "-1",
                 final_path
             ]
-            subprocess.run(cmd, check=True, timeout=180, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, timeout=240, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
@@ -475,7 +447,7 @@ def process_video(req: ProcessVideoReq):
             })
 
         if not is_vip:
-            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE LOWER(TRIM(email)) = ?", (req.clip_count, normalize_email(req.email)))
+            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + 1 WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
             conn.commit()
 
         conn.close()
