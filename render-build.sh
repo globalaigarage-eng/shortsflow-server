@@ -285,7 +285,7 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- YouTube HTTP 429 & Format Block Bypass Downloader ---
+# --- Clean Multi-Proxy Downloader Engine ---
 def download_media_stream(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
@@ -293,13 +293,13 @@ def download_media_stream(url: str, output_path: str):
 
     video_id = extract_youtube_id(clean_url)
 
-    # 1. YouTube නම්: Render IP එක කෙලින්ම YouTube වලට නොයවා Public Stream Resolvers හරහා බාගත කිරීම
+    # 1. YouTube නම්: Render IP එක කෙලින්ම YouTube වෙත නොයවා Public Direct Stream Gateways හරහා බාගත කිරීම
     if video_id:
         stream_resolvers = [
             f"https://api.piped.private.coffee/streams/{video_id}",
             f"https://pipedapi.kavin.rocks/streams/{video_id}",
-            f"https://vid.priv.au/api/v1/videos/{video_id}",
-            f"https://inv.nadeko.net/api/v1/videos/{video_id}"
+            f"https://inv.nadeko.net/api/v1/videos/{video_id}",
+            f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}"
         ]
 
         for api_url in stream_resolvers:
@@ -308,19 +308,17 @@ def download_media_stream(url: str, output_path: str):
                     api_url, 
                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
                 )
-                with urllib.request.urlopen(req, timeout=9) as res:
+                with urllib.request.urlopen(req, timeout=7) as res:
                     data = json.loads(res.read().decode('utf-8'))
                     title = data.get("title", "Viral Highlight")
                     duration = int(data.get("duration", data.get("lengthSeconds", 180)))
 
                     direct_stream_url = None
-                    # Piped format check
                     if "videoStreams" in data:
                         for s in data["videoStreams"]:
                             if s.get("format") == "MPEG_4" or "mp4" in s.get("mimeType", ""):
                                 direct_stream_url = s.get("url")
                                 break
-                    # Invidious format check
                     elif "formatStreams" in data:
                         for s in data["formatStreams"]:
                             if "mp4" in s.get("type", ""):
@@ -328,7 +326,6 @@ def download_media_stream(url: str, output_path: str):
                                 break
 
                     if direct_stream_url:
-                        # FFmpeg මඟින් stream එක සෘජුවම MP4 ලෙස copy කර බාගත කිරීම
                         cmd = [FFMPEG_BIN, "-y", "-i", direct_stream_url, "-c", "copy", "-t", "360", output_path]
                         subprocess.run(cmd, check=True, timeout=120)
                         return title, duration
@@ -337,7 +334,6 @@ def download_media_stream(url: str, output_path: str):
 
     # 2. Facebook, TikTok, Instagram හෝ Direct Extraction
     target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
-    cookie_path = os.path.join(PROJECT_DIR, "cookies.txt")
 
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
@@ -346,22 +342,18 @@ def download_media_stream(url: str, output_path: str):
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 2,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "mweb"]
+                "player_client": ["android", "ios"]
             }
         },
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
         }
     }
-
-    if os.path.isfile(cookie_path) and os.access(cookie_path, os.R_OK):
-        ydl_opts["cookiefile"] = cookie_path
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
