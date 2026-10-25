@@ -1,5 +1,5 @@
 fastapi>=0.110.0
 uvicorn>=0.28.0
 yt-dlp>=2024.10.22
-yt-dlp-youtube-oauth2
+yt-dlp>=2024.10.22
 pydantic>=2.6.0
