@@ -104,7 +104,7 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Highlight clip from {clean_title}! Share, like and follow.",
+            "description": f"Must see highlight clip from {clean_title}! Share, like and follow.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
@@ -115,7 +115,7 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
     Respond ONLY in strict JSON:
     {{
         "title": "Dramatic Title{suffix}",
-        "description": "Engaging 2-sentence description",
+        "description": "Engaging 2-sentence description summarizing this part",
         "hashtags": "#Viral #Trending #FYP #Reels #Shorts"
     }}
     """
@@ -152,13 +152,6 @@ class ResetReq(BaseModel):
 class ActivateVipReq(BaseModel):
     admin_email: str
     target_user_email: str
-
-# කිසිදු field එකක් missing නොවන flexible schema එකක්
-class ProcessVideoReq(BaseModel):
-    email: str
-    video_url: Optional[str] = None
-    youtube_url: Optional[str] = None
-    clip_count: Optional[int] = 1
 
 @app.post("/auth/register")
 def register(req: AuthReq):
@@ -264,7 +257,7 @@ def download_social_video(url: str, output_path: str):
     if "youtube.com" in clean_url or "youtu.be" in clean_url:
         raise HTTPException(
             status_code=400, 
-            detail="YouTube සහය නොදක්වයි. කරුණාකර Facebook, TikTok, Instagram, Twitter (X), Pinterest වීඩියෝ link එකක් ලබා දෙන්න."
+            detail="YouTube සහය නොදක්වයි. Facebook, TikTok, Instagram, Twitter (X), Pinterest වීඩියෝ link එකක් ලබා දෙන්න."
         )
 
     ydl_opts = {
@@ -296,18 +289,34 @@ def download_social_video(url: str, output_path: str):
             detail=f"වීඩියෝව බාගත කිරීම අසාර්ථක විය: {str(exc)[:250]}"
         ) from exc
 
+# කිසිදු Missing Validation දෝෂයක් නොඑන Universal Process Endpoint එක
 @app.post("/process-video")
-def process_video(req: ProcessVideoReq):
+async def process_video(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    user_email = (body.get("email") or "").strip()
+    url_to_process = (
+        body.get("video_url") or 
+        body.get("youtube_url") or 
+        body.get("url") or 
+        ""
+    ).strip()
+
+    if not user_email:
+        raise HTTPException(status_code=400, detail="User email එක අවශ්‍යයි.")
+    if not url_to_process:
+        raise HTTPException(status_code=400, detail="කරුණාකර වලංගු Video URL එකක් ඇතුළත් කරන්න.")
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
+    cursor.execute("SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(user_email),))
     user = cursor.fetchone()
     
     if not user:
-        email_key = normalize_email(req.email)
-        if not email_key or "@" not in email_key:
-            conn.close()
-            raise HTTPException(status_code=400, detail="වලංගු email ලිපිනයක් අවශ්‍යයි.")
+        email_key = normalize_email(user_email)
         is_admin_email = bool(ADMIN_EMAIL) and email_key == normalize_email(ADMIN_EMAIL)
         try:
             cursor.execute(
@@ -335,14 +344,8 @@ def process_video(req: ProcessVideoReq):
         conn.close()
         raise HTTPException(
             status_code=403, 
-            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට: {clips_used}). PRO VIP ලබාගන්න."
+            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට සාදා ඇත: {clips_used}). Unlimited සඳහා PRO VIP ලබාගන්න."
         )
-
-    # youtube_url හෝ video_url දෙකෙන්ම එකක් ලබා ගැනීම
-    url_to_process = (req.video_url or req.youtube_url or "").strip()
-    if not url_to_process:
-        conn.close()
-        raise HTTPException(status_code=400, detail="කරුණාකර වලංගු Video URL එකක් ඇතුළත් කරන්න.")
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
@@ -421,7 +424,7 @@ def process_video(req: ProcessVideoReq):
             })
 
         if not is_vip:
-            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE LOWER(TRIM(email)) = ?", (len(output_data), normalize_email(req.email)))
+            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE LOWER(TRIM(email)) = ?", (len(output_data), normalize_email(user_email)))
             conn.commit()
 
         conn.close()
