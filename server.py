@@ -44,9 +44,6 @@ else:
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().casefold()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-
-otp_storage: dict[str, dict[str, Any]] = {}
 
 def normalize_email(email: Any) -> str:
     return str(email or "").strip().casefold()
@@ -120,18 +117,6 @@ def health():
     return {"status": "ok", "ffmpeg_available": True}
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
-
-def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: int):
-    clean_title = re.sub(r"[^\w\s-]", "", video_title or "Social Video")[:40].strip()
-    if not clean_title:
-        clean_title = "Social Video"
-    suffix = f" (Part {part_num})" if total_parts > 1 else ""
-    fallback_title = f"🔥 {clean_title}{suffix}"
-    return {
-        "title": fallback_title,
-        "description": f"Must see highlight clip from {clean_title}! Share and follow.",
-        "hashtags": "#Shorts #Viral #Trending #FYP #Reels",
-    }
 
 @app.post("/auth/register")
 async def register(request: Request):
@@ -216,16 +201,15 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "bestvideo[height<=720]+bestaudio/best/best",
+        "format": "best[ext=mp4]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": 60,
         "noplaylist": True,
-        "merge_output_format": "mp4",
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
         },
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -268,7 +252,6 @@ async def process_video(request: Request):
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        # Free user සඳහා උපරිම විනාඩි 10 (තත්පර 600) සීමාව
         if not is_vip and total_duration > 600:
             raise HTTPException(
                 status_code=403,
@@ -287,8 +270,7 @@ async def process_video(request: Request):
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            meta = generate_metadata_with_gemini(video_title, i + 1, total_parts)
-            title_text = escape_drawtext(meta.get("title", ""))
+            title_text = escape_drawtext(video_title)
 
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280[bg];"
@@ -312,14 +294,14 @@ async def process_video(request: Request):
                 "-movflags", "+faststart", "-map_metadata", "-1", final_path,
             ]
 
-            # Timeout සීමාව තත්පර 300 (විනාඩි 5) දක්වා වැඩි කර ඇත
+            # Timeout සීමාව තත්පර 300 දක්වා ඉහළ නංවා ඇත
             subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
-                "title": meta.get("title", ""),
-                "description": meta.get("description", ""),
-                "hashtags": meta.get("hashtags", ""),
+                "title": video_title,
+                "description": f"Highlight from {video_title}",
+                "hashtags": "#Shorts #Viral #Trending #FYP",
             })
 
         return {"status": "success", "results": output_data}
