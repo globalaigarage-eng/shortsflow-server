@@ -169,7 +169,7 @@ Respond ONLY in strict JSON:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=6) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             response_data = json.loads(response.read().decode("utf-8"))
 
         candidates = response_data.get("candidates") or []
@@ -621,7 +621,6 @@ async def process_video(request: Request):
                 "boxborderw=10:x=(w-text_w)/2:y=120[vout]"
             )
 
-            # VIP / Admin අයට Watermark එක 100% ක් සම්පූර්ණයෙන්ම ඉවත් වේ
             if not is_vip:
                 vf_filter = (
                     base_filter
@@ -657,7 +656,7 @@ async def process_video(request: Request):
                 "-crf",
                 "22",
                 "-preset",
-                "ultrafast",  # ක්ෂණිකව convert වීමට ultrafast සකසා ඇත
+                "ultrafast",
                 "-threads",
                 "2",
                 "-c:a",
