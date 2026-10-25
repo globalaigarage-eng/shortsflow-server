@@ -214,6 +214,7 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
+# --- Video ID Extractor ---
 def extract_youtube_id(url: str):
     patterns = [
         r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})'
@@ -224,14 +225,15 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- Downloader Engine ---
+# --- YouTube & Video Downloader Engine ---
 def download_media_stream(url: str, output_path: str):
     clean_url = url.split("?si=")[0].split("&si=")[0].strip()
     video_id = extract_youtube_id(clean_url)
     
-    # 1. YouTube නම්: Bot detection එකෙන් block නොවන Android VR / TV clients යොදා ගැනීම
     if video_id:
         target_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Datacenter IP block සහ Bot Block මඟහරින Android Testsuite client engine
         ydl_opts = {
             'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
             'outtmpl': output_path,
@@ -240,47 +242,24 @@ def download_media_stream(url: str, output_path: str):
             'no_warnings': True,
             'nocheckcertificate': True,
             'socket_timeout': 30,
-            # Bot block නොවන Android VR සහ TV clients
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android_vr', 'tv'],
+                    'player_client': ['android_testsuite', 'android_creator'],
                     'player_skip': ['webpage', 'configs']
                 }
             },
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (PlayStation 4 5.05) AppleWebKit/601.2 (KHTML, like Gecko)'
+                'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 12; Pixel 6 Build/SQ3A.220705.004)'
             }
         }
         
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(target_url, download=True)
-                title = info.get('title', 'Viral Clip')
-                duration = int(info.get('duration') or 180)
-                return title, duration
-        except Exception as e:
-            print(f"[DEBUG] Primary client failed: {e}, falling back to Web Embedded...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target_url, download=True)
+            title = info.get('title', 'Viral Clip')
+            duration = int(info.get('duration') or 180)
+            return title, duration
 
-            # 2. Fallback: Web Embedded client
-            fallback_opts = {
-                'format': 'best[ext=mp4]/best',
-                'outtmpl': output_path,
-                'overwrites': True,
-                'quiet': True,
-                'nocheckcertificate': True,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['web_embedded']
-                    }
-                }
-            }
-            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                info = ydl.extract_info(target_url, download=True)
-                title = info.get('title', 'Viral Clip')
-                duration = int(info.get('duration') or 180)
-                return title, duration
-
-    # FB, TikTok, Reels සඳහා
+    # FB, TikTok, IG සඳහා
     generic_opts = {
         'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
         'outtmpl': output_path,
