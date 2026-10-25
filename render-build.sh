@@ -8,10 +8,8 @@ import random
 import urllib.request
 import math
 from datetime import datetime, timedelta
-from typing import Optional, Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 import yt_dlp
 
 app = FastAPI(title="ShortsFlow Universal AI Backend")
@@ -104,7 +102,7 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Must see highlight clip from {clean_title}! Share, like and follow.",
+            "description": f"Highlight clip from {clean_title}! Share, like and follow.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
@@ -136,32 +134,20 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
             "hashtags": "#Viral #Trending #FYP #Reels"
         }
 
-class AuthReq(BaseModel):
-    email: str
-    password: str
-    device_id: str = "UNKNOWN"
-
-class ForgotReq(BaseModel):
-    email: str
-
-class ResetReq(BaseModel):
-    email: str
-    otp: str
-    new_password: str
-
-class ActivateVipReq(BaseModel):
-    admin_email: str
-    target_user_email: str
-
 @app.post("/auth/register")
-def register(req: AuthReq):
+async def register(request: Request):
+    data = await request.json()
+    email = data.get("email", "")
+    password = data.get("password", "")
+    device_id = data.get("device_id", "UNKNOWN")
+
     conn = get_db_connection()
     cursor = conn.cursor()
     current_month = datetime.now().strftime("%Y-%m")
-    user_email = normalize_email(req.email)
+    user_email = normalize_email(email)
     
-    if user_email != ADMIN_EMAIL.lower() and req.device_id and req.device_id != "UNKNOWN":
-        cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
+    if user_email != ADMIN_EMAIL.lower() and device_id and device_id != "UNKNOWN":
+        cursor.execute("SELECT email FROM users WHERE device_id = ?", (device_id,))
         if cursor.fetchone():
             conn.close()
             raise HTTPException(status_code=403, detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!")
@@ -170,7 +156,7 @@ def register(req: AuthReq):
         cursor.execute(
             "INSERT INTO users (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
             "VALUES (?, ?, 0, NULL, 0, ?, ?)",
-            (user_email, req.password, current_month, req.device_id)
+            (user_email, password, current_month, device_id)
         )
         conn.commit()
         return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
@@ -180,34 +166,41 @@ def register(req: AuthReq):
         conn.close()
 
 @app.post("/auth/login")
-def login(req: AuthReq):
+async def login(request: Request):
+    data = await request.json()
+    email = data.get("email", "")
+    password = data.get("password", "")
+
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT email, is_vip, vip_expiry, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ? AND password = ?", 
-                   (normalize_email(req.email), req.password))
+                   (normalize_email(email), password))
     user = cursor.fetchone()
     conn.close()
     
     if not user:
         raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
     
-    email, is_vip, vip_expiry, clips_used = user
+    user_mail, is_vip, vip_expiry, clips_used = user
     if is_vip and vip_expiry and datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
         is_vip = 0
             
     return {
         "status": "success",
-        "email": email,
+        "email": user_mail,
         "is_vip": bool(is_vip),
-        "is_admin": (normalize_email(email) == normalize_email(ADMIN_EMAIL) if ADMIN_EMAIL else False),
+        "is_admin": (normalize_email(user_mail) == normalize_email(ADMIN_EMAIL) if ADMIN_EMAIL else False),
         "links_used": clips_used
     }
 
 @app.post("/auth/forgot-password")
-def forgot_password(req: ForgotReq):
+async def forgot_password(request: Request):
+    data = await request.json()
+    email = data.get("email", "")
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
+    cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(email),))
     user = cursor.fetchone()
     conn.close()
 
@@ -215,20 +208,25 @@ def forgot_password(req: ForgotReq):
         raise HTTPException(status_code=404, detail="Email ලිපිනය හමු නොවීය.")
 
     otp = str(random.randint(100000, 999999))
-    otp_storage[normalize_email(req.email)] = otp
+    otp_storage[normalize_email(email)] = otp
     return {"status": "success", "message": "OTP කේතය Email වෙත යවන ලදී (Demo: " + otp + ")"}
 
 @app.post("/auth/reset-password")
-def reset_password(req: ResetReq):
-    target_email = normalize_email(req.email)
+async def reset_password(request: Request):
+    data = await request.json()
+    email = data.get("email", "")
+    otp = data.get("otp", "")
+    new_password = data.get("new_password", "")
+
+    target_email = normalize_email(email)
     stored_otp = otp_storage.get(target_email)
 
-    if not stored_otp or stored_otp != req.otp.strip():
+    if not stored_otp or stored_otp != otp.strip():
         raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි.")
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET password = ? WHERE email = ?", (req.new_password, target_email))
+    cursor.execute("UPDATE users SET password = ? WHERE email = ?", (new_password, target_email))
     conn.commit()
     conn.close()
 
@@ -236,18 +234,22 @@ def reset_password(req: ResetReq):
     return {"status": "success", "message": "Password යාවත්කාලීන විය!"}
 
 @app.post("/admin/activate-vip")
-def activate_vip(req: ActivateVipReq):
-    if not ADMIN_EMAIL or not ADMIN_PASSWORD or normalize_email(req.admin_email) != ADMIN_EMAIL:
+async def activate_vip(request: Request):
+    data = await request.json()
+    admin_email = data.get("admin_email", "")
+    target_user_email = data.get("target_user_email", "")
+
+    if not ADMIN_EMAIL or not ADMIN_PASSWORD or normalize_email(admin_email) != ADMIN_EMAIL:
         raise HTTPException(status_code=403, detail="අවසර නැත.")
     
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET is_vip = 1, vip_expiry = ? WHERE email = ?", 
-                   (expiry, normalize_email(req.target_user_email)))
+                   (expiry, normalize_email(target_user_email)))
     conn.commit()
     conn.close()
-    return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
+    return {"status": "success", "message": f"{target_user_email} VIP සක්‍රීය විය!"}
 
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
@@ -257,7 +259,7 @@ def download_social_video(url: str, output_path: str):
     if "youtube.com" in clean_url or "youtu.be" in clean_url:
         raise HTTPException(
             status_code=400, 
-            detail="YouTube සහය නොදක්වයි. Facebook, TikTok, Instagram, Twitter (X), Pinterest වීඩියෝ link එකක් ලබා දෙන්න."
+            detail="YouTube සහය නොදක්වයි. කරුණාකර Facebook, TikTok, Instagram, Twitter (X), Pinterest වීඩියෝ link එකක් ලබා දෙන්න."
         )
 
     ydl_opts = {
@@ -280,7 +282,7 @@ def download_social_video(url: str, output_path: str):
             info = ydl.extract_info(clean_url, download=True)
             if not info:
                 raise RuntimeError("No video information extracted")
-            title = info.get("title") or "Viral Video"
+            title = info.get("title") or "Viral Social Video"
             duration = int(info.get("duration") or 60)
             return title, duration
     except Exception as exc:
@@ -289,7 +291,7 @@ def download_social_video(url: str, output_path: str):
             detail=f"වීඩියෝව බාගත කිරීම අසාර්ථක විය: {str(exc)[:250]}"
         ) from exc
 
-# කිසිදු Missing Validation දෝෂයක් නොඑන Universal Process Endpoint එක
+# කිසිම Pydantic Validation එකක් නැතිව සෘජුවම JSON කියවන endpoint එක
 @app.post("/process-video")
 async def process_video(request: Request):
     try:
@@ -298,6 +300,7 @@ async def process_video(request: Request):
         body = {}
 
     user_email = (body.get("email") or "").strip()
+    # පැරණි හෝ අලුත් කුමන field එකකින් ආවත් URL එක ලබාගැනීම
     url_to_process = (
         body.get("video_url") or 
         body.get("youtube_url") or 
@@ -344,7 +347,7 @@ async def process_video(request: Request):
         conn.close()
         raise HTTPException(
             status_code=403, 
-            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට සාදා ඇත: {clips_used}). Unlimited සඳහා PRO VIP ලබාගන්න."
+            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට: {clips_used}). PRO VIP ලබාගන්න."
         )
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
