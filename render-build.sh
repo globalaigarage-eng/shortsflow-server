@@ -125,7 +125,7 @@ def generate_metadata_with_gemini(video_title: str, clip_index: int):
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Highlight moment from {clean_title}! Share and follow.",
+            "description": f"Must watch viral clip from {clean_title}! Like and follow for more.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
@@ -285,7 +285,7 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- Clean Multi-Proxy Downloader Engine ---
+# --- Multi-Source Stream Downloader ---
 def download_media_stream(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
@@ -293,25 +293,22 @@ def download_media_stream(url: str, output_path: str):
 
     video_id = extract_youtube_id(clean_url)
 
-    # 1. YouTube නම්: Render IP එක කෙලින්ම YouTube වෙත නොයවා Public Direct Stream Gateways හරහා බාගත කිරීම
+    # 1. YouTube නම්: Piped/Invidious proxy stream fetching
     if video_id:
         stream_resolvers = [
             f"https://api.piped.private.coffee/streams/{video_id}",
             f"https://pipedapi.kavin.rocks/streams/{video_id}",
-            f"https://inv.nadeko.net/api/v1/videos/{video_id}",
-            f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}"
+            f"https://vid.priv.au/api/v1/videos/{video_id}",
+            f"https://inv.nadeko.net/api/v1/videos/{video_id}"
         ]
 
         for api_url in stream_resolvers:
             try:
-                req = urllib.request.Request(
-                    api_url, 
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-                )
+                req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=7) as res:
                     data = json.loads(res.read().decode('utf-8'))
-                    title = data.get("title", "Viral Highlight")
-                    duration = int(data.get("duration", data.get("lengthSeconds", 180)))
+                    title = data.get("title", "Viral Short")
+                    duration = int(data.get("duration", data.get("lengthSeconds", 60)))
 
                     direct_stream_url = None
                     if "videoStreams" in data:
@@ -326,13 +323,13 @@ def download_media_stream(url: str, output_path: str):
                                 break
 
                     if direct_stream_url:
-                        cmd = [FFMPEG_BIN, "-y", "-i", direct_stream_url, "-c", "copy", "-t", "360", output_path]
-                        subprocess.run(cmd, check=True, timeout=120)
+                        cmd = [FFMPEG_BIN, "-y", "-i", direct_stream_url, "-c", "copy", "-t", "300", output_path]
+                        subprocess.run(cmd, check=True, timeout=90)
                         return title, duration
             except Exception:
                 continue
 
-    # 2. Facebook, TikTok, Instagram හෝ Direct Extraction
+    # 2. Facebook, TikTok, Instagram, Rumble (Cloud-Friendly yt-dlp)
     target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
 
     ydl_opts = {
@@ -342,14 +339,9 @@ def download_media_stream(url: str, output_path: str):
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": 30,
-        "retries": 2,
+        "retries": 3,
         "noplaylist": True,
         "merge_output_format": "mp4",
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "ios"]
-            }
-        },
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
         }
@@ -359,14 +351,14 @@ def download_media_stream(url: str, output_path: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(target_url, download=True)
             if not info:
-                raise RuntimeError("yt-dlp returned no video info")
-            title = info.get("title") or "Viral Clip"
-            duration = int(info.get("duration") or 180)
+                raise RuntimeError("No video information extracted")
+            title = info.get("title") or "Viral Reel"
+            duration = int(info.get("duration") or 60)
             return title, duration
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Video download අසාර්ථක විය: {str(exc)[:300]}"
+            detail=f"වීඩියෝව බාගත කළ නොහැකි විය: {str(exc)[:250]}"
         ) from exc
 
 @app.post("/process-video")
@@ -396,17 +388,11 @@ def process_video(req: ProcessVideoReq):
                 ),
             )
             conn.commit()
-            cursor.execute(
-                "SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?",
-                (email_key,),
-            )
+            cursor.execute("SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?", (email_key,))
             user = cursor.fetchone()
         except sqlite3.Error as exc:
             conn.close()
-            raise HTTPException(status_code=500, detail=f"User record එක සකස් කිරීමට නොහැකි විය: {exc}")
-        if not user:
-            conn.close()
-            raise HTTPException(status_code=500, detail="User record එක සකස් කිරීමට නොහැකි විය.")
+            raise HTTPException(status_code=500, detail=f"Database error: {exc}")
 
     is_vip, clips_used = user[0], user[1] or 0
 
@@ -425,14 +411,15 @@ def process_video(req: ProcessVideoReq):
     try:
         video_title, total_duration = download_media_stream(req.youtube_url, raw_video)
         
-        clip_duration = 30
-        usable_duration = max(total_duration - 15, clip_duration * req.clip_count)
+        # Shorts & Reels සඳහා නියම කාල පරාසය (තත්පර 15-45)
+        clip_duration = min(35, max(15, total_duration // req.clip_count))
+        usable_duration = max(total_duration - 5, clip_duration * req.clip_count)
         step_interval = usable_duration // (req.clip_count + 1)
 
         for i in range(req.clip_count):
-            start_sec = 8 + (step_interval * (i + 1))
+            start_sec = 2 + (step_interval * (i + 1))
             if start_sec + clip_duration > total_duration:
-                start_sec = max(0, total_duration - clip_duration - (i * 2))
+                start_sec = max(0, total_duration - clip_duration)
 
             clip_name = f"clip_{int(datetime.now().timestamp())}_{i+1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
@@ -451,9 +438,14 @@ def process_video(req: ProcessVideoReq):
                 .replace("\\n", " ")
             )
 
+            # --- Anti-Copyright AI Bypass Filter Complex ---
+            # 1. Video 9:16 Reframe with Blurred Background
+            # 2. Subtle Color Tuning (eq=brightness=0.03:saturation=1.12:contrast=1.05) - Content ID bypass
+            # 3. Micro Speed Adjust (setpts=0.97*PTS) - Video Hash bypass
+            # 4. Audio Pitch & Speed shift (atempo=1.03) - Audio Fingerprint bypass
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
-                "[0:v]scale=720:-1[fg];"
+                "[0:v]scale=720:-1,eq=brightness=0.03:saturation=1.12:contrast=1.05,setpts=0.97*PTS[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2[combined];"
                 f"[combined]drawtext=text='{title_text[:35]}':fontcolor=yellow:fontsize=36:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=120"
             )
@@ -467,11 +459,13 @@ def process_video(req: ProcessVideoReq):
                 FFMPEG_BIN, "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
                 "-t", str(clip_duration),
                 "-filter_complex", vf_filter,
-                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-threads", "2",
-                "-c:a", "aac", "-b:a", "128k",
+                "-af", "atempo=1.03,volume=1.05",
+                "-c:v", "libx264", "-crf", "22", "-preset", "veryfast", "-threads", "2",
+                "-c:a", "aac", "-b:a", "192k",
+                "-map_metadata", "-1",
                 final_path
             ]
-            subprocess.run(cmd, check=True, timeout=240, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, timeout=180, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
@@ -502,15 +496,7 @@ def process_video(req: ProcessVideoReq):
         detail = (e.stderr or e.stdout or str(e)).strip()
         raise HTTPException(
             status_code=500,
-            detail=f"FFmpeg processing failed: {detail[-600:]}"
-        )
-    except subprocess.TimeoutExpired:
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
-        conn.close()
-        raise HTTPException(
-            status_code=504,
-            detail="FFmpeg processing timed out."
+            detail=f"FFmpeg error: {detail[-400:]}"
         )
     except Exception as e:
         if os.path.exists(raw_video):
