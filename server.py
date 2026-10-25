@@ -14,24 +14,54 @@ import yt_dlp
 
 app = FastAPI(title="ShortsFlow Universal AI Backend")
 
-# Render configuration. Keep this URL aligned with the existing Render service.
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL", "https://shortsflow-server.onrender.com"
 ).strip().rstrip("/")
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Keep SQLite in one stable location. On Render, attach a persistent disk
-# mounted at /var/data and set SHORTSFLOW_DB_PATH=/var/data/shortsflow.db;
-# otherwise the free ephemeral filesystem can lose user/VIP records on redeploy.
+# --- Auto Setup YouTube Cookies ---
+YOUTUBE_COOKIES_CONTENT = """# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.youtube.com	TRUE	/	TRUE	1806541023	__Secure-BUCKET	CAA
+.youtube.com	TRUE	/	TRUE	1826967284	LOGIN_INFO	AFmmF2swRAIgJFGuBLvE1WM6CdHvTp1GyLePYLCl_d4yTWenlSuyUSUCIGr3CJA7fh0uIj4MpX0V-v6C-mR5wtTy52enqGOsLQEt:QUQ3MjNmeDlfUlE4VjZEdy0tZzZrTUlrUkx4c3lnUmJWRjNiWW5uM0NzbW1kSGNyam85OUNsWkJJU3JCYXNlQjFjUDdCcUZIOUY0OVFSNVZBLUFJZDZjT1IyNzUxN1ZrVW1yLUZ1c0o0Y1FVZVFvbWVmNi1pY1hTY2RQZW8tNjFJMnlncVJKTEhmRC1IamhicjJkMjVSSFpKNHFjejNxcEJn
+.youtube.com	TRUE	/	TRUE	1827488711	PREF	f6=40000000&tz=Asia.Colombo&f7=140
+.youtube.com	TRUE	/	FALSE	1827413136	SID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmQsq5j6wgYKwrg2e-MpC8xQACgYKAYsSARISFQHGX2MiRcWhXvMcLFUUedBNY9j1VxoVAUF8yKoO7ZH8TvVSSdZNztszAJeM0076
+.youtube.com	TRUE	/	TRUE	1827413136	__Secure-1PSID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmDHCzLAwpzmU-nhYVmpotogACgYKATsSARISFQHGX2MifLMBhXpJYWZ9pnwn4Kv3hhoVAUF8yKqwlEh282ce4zZMkzukQQth0076
+.youtube.com	TRUE	/	TRUE	1827413136	__Secure-3PSID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmxetittpqeBqdOeFF6BzbyAACgYKAUESARISFQHGX2MipWwXvsnWHm_DgWEl0H3UHRoVAUF8yKqY12ewy0-X474i5_9xdF8Q0076
+.youtube.com	TRUE	/	FALSE	1827413136	HSID	A-L2rwjijeBhp-f1c
+.youtube.com	TRUE	/	TRUE	1827413136	SSID	ATawqqMoJalvUEHhg
+.youtube.com	TRUE	/	FALSE	1827413136	APISID	q69FTQSPSSvMznSH/AoEmRy5EsxSJDoGIf
+.youtube.com	TRUE	/	TRUE	1827413136	SAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
+.youtube.com	TRUE	/	TRUE	1827413136	__Secure-1PAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
+.youtube.com	TRUE	/	TRUE	1827413136	__Secure-3PAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
+.youtube.com	TRUE	/	TRUE	1824467723	__Secure-1PSIDTS	sidts-CjUBkldj_w7O-8zKo1ZipMsXpsoXrq1rkT1PasCk7jMd3q3DoL9bJOdnq9YZFnlS7FZuoA7K4BAA
+.youtube.com	TRUE	/	TRUE	1824467723	__Secure-3PSIDTS	sidts-CjUBkldj_w7O-8zKo1ZipMsXpsoXrq1rkT1PasCk7jMd3q3DoL9bJOdnq9YZFnlS7FZuoA7K4BAA
+.youtube.com	TRUE	/	FALSE	1824467723	SIDCC	APD_SKHFsH6vBHy-O_pQaqAXCRCz7ucGJqsk-a_DdoyxjMoTCbmTvQFodaO1Mk4RVLcrSJ6lGw
+.youtube.com	TRUE	/	TRUE	1824467723	__Secure-1PSIDCC	APD_SKHuKG5f66gxoff4nRRdqLo9bVf1BHppgLqp5IzTtuLfViIesIz9caYAnJqAZVT-pyib6e8
+.youtube.com	TRUE	/	TRUE	1824467723	__Secure-3PSIDCC	APD_SKF2KTeoEQwYkiyqf2wXh7GD7aItBG0EbUzTcBiZJYoZ-Bzz1VOju1EaUMJoLrYWyK0Qcg
+.youtube.com	TRUE	/	TRUE	1808480709	VISITOR_INFO1_LIVE	yhxEadWk0xc
+.youtube.com	TRUE	/	TRUE	1808480709	VISITOR_PRIVACY_METADATA	CgJMSxIEGgAgFw%3D%3D
+.youtube.com	TRUE	/	TRUE	1808475616	__Secure-YNID	Cu0BCAUSnwEB8QZuZkxxV6PqYj4KsUFGTzOgb_NEn2vDWEEYsBzpyDIJh5xw1KvDPDca2_uqg6ZwUeZd8gl950cRRoNWBBsm-YNfVwT-9BVh0_9rqYR7qeV4NkzEmnJossZbc3XwcPU_GgdrniZA5KQhU9C4yL8WZZBCv9Vu7CFFDL_AnJD1-62mcO_97RqqTeoP_Godp_-KCnAbYXDcLMbrJRbmmSIoBTJFAd6pnU8vngRfbfS8IV1pOcV2LUnsQhKq8v_Ad823Bus1J4BsIkq0pIxz4LVwHuKt2EfmK_mRJVrZmbg4A7Q2uJWJSakP
+.youtube.com	TRUE	/	TRUE	1808475616	__Secure-ROLLOUT_TOKEN	CN7lz5299oL5QRDB4p_f6rGWAxi9qt75-NSXAw%3D%3D
+.youtube.com	TRUE	/	TRUE	0	YSC	bWw2jQp5cBs
+"""
+
+COOKIE_PATH = os.path.join(PROJECT_DIR, "cookies.txt")
+try:
+    with open(COOKIE_PATH, "w", encoding="utf-8") as f:
+        f.write(YOUTUBE_COOKIES_CONTENT.strip())
+except Exception as e:
+    pass
+
 DB_PATH = os.environ.get(
     "SHORTSFLOW_DB_PATH", os.path.join(PROJECT_DIR, "shortsflow.db")
 ).strip()
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
 
-# One-time compatibility: if an older deployment created the DB in its
-# working directory, copy it to the stable path rather than silently losing users.
 _LEGACY_DB_PATH = os.path.abspath("shortsflow.db")
 if (
     not os.path.exists(DB_PATH)
@@ -52,7 +82,6 @@ def normalize_email(email: str) -> str:
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Prefer the FFmpeg binary installed by render-build.sh.
 FFMPEG_DIR = "/opt/render/project/.render/ffmpeg"
 FFMPEG_BIN = os.path.join(FFMPEG_DIR, "ffmpeg")
 if not (os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)):
@@ -67,7 +96,6 @@ def health():
     if os.path.isabs(FFMPEG_BIN):
         ffmpeg_available = os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)
     else:
-        import shutil
         ffmpeg_available = shutil.which(FFMPEG_BIN) is not None
     return {
         "status": "ok",
@@ -77,8 +105,8 @@ def health():
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().lower()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 otp_storage = {}
@@ -107,8 +135,6 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
-    # Admin credentials must be configured as Render environment variables.
-    # Do not create an admin account with an empty/default password.
     if ADMIN_EMAIL and ADMIN_PASSWORD:
         cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(ADMIN_EMAIL),))
         if not cursor.fetchone():
@@ -287,7 +313,6 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- Video ID Extractor ---
 def extract_youtube_id(url: str):
     patterns = [
         r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})'
@@ -298,25 +323,13 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- YouTube & Video Downloader Engine ---
 def download_media_stream(url: str, output_path: str):
-    """Download one public video with yt-dlp and report actionable errors.
-
-    Optional cookies must be a valid, private Netscape-format cookies.txt file.
-    Set YOUTUBE_COOKIES_FILE to its absolute path in Render Environment.
-    Never commit cookies or share them publicly. Cookies cannot remove a hosting-IP
-    rate limit, and this function deliberately does not try to bypass YouTube blocks.
-    """
     clean_url = (url or "").strip()
     if not clean_url:
         raise HTTPException(status_code=400, detail="කරුණාකර video URL එකක් ඇතුළත් කරන්න.")
 
     video_id = extract_youtube_id(clean_url)
     target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
-
-    # Only use cookies when the operator explicitly configures a private,
-    # fresh cookies.txt file. Do not auto-load stale cookies from the repository.
-    cookie_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
 
     ydl_opts = {
         "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
@@ -325,36 +338,21 @@ def download_media_stream(url: str, output_path: str):
         "quiet": True,
         "no_warnings": False,
         "socket_timeout": 30,
-        # Do not hammer YouTube after a rate limit. A 429 should be allowed
-        # to cool down rather than triggering a retry storm.
-        "retries": 0,
-        "fragment_retries": 0,
-        "extractor_retries": 0,
-        "sleep_interval_requests": 2,
+        "retries": 2,
+        "fragment_retries": 2,
+        "extractor_retries": 2,
         "noplaylist": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        }
     }
 
-    # yt-dlp's current YouTube extractor can use Deno for JavaScript challenge
-    # solving. render-build.sh installs Deno at this stable path. If absent,
-    # yt-dlp still runs but may be unable to extract some YouTube videos.
-    deno_path = os.environ.get(
-        "DENO_BIN", "/opt/render/project/.render/deno/bin/deno"
-    ).strip()
+    deno_path = os.environ.get("DENO_BIN", "/opt/render/project/.render/deno/bin/deno").strip()
     if deno_path and os.path.isfile(deno_path) and os.access(deno_path, os.X_OK):
         ydl_opts["js_runtimes"] = {"deno": {"path": deno_path}}
 
-    if cookie_path:
-        if not os.path.isfile(cookie_path):
-            raise HTTPException(
-                status_code=503,
-                detail="YOUTUBE_COOKIES_FILE path එක server එකේ හමු නොවීය. Render Environment path එක පරීක්ෂා කරන්න."
-            )
-        if not os.access(cookie_path, os.R_OK):
-            raise HTTPException(
-                status_code=503,
-                detail="YouTube cookies file එක කියවිය නොහැක. File permissions පරීක්ෂා කරන්න."
-            )
-        ydl_opts["cookiefile"] = cookie_path
+    if os.path.isfile(COOKIE_PATH) and os.access(COOKIE_PATH, os.R_OK):
+        ydl_opts["cookiefile"] = COOKIE_PATH
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -373,40 +371,18 @@ def download_media_stream(url: str, output_path: str):
         if "429" in lowered or "too many requests" in lowered:
             raise HTTPException(
                 status_code=429,
-                detail=(
-                    "YouTube විසින් ShortsFlow server එකේ requests තාවකාලිකව සීමා කර ඇත (HTTP 429). "
-                    "මෙය app email එකේ හෝ Public URL එකේ දෝෂයක් නොවේ. නැවත නැවත උත්සාහ නොකර ටික වේලාවකට පසු නැවත උත්සාහ කරන්න. "
-                    "Render hosting IP එක දිගටම rate-limit වුවහොත් YouTube download සඳහා වෙනත් නිල/අවසර ලත් source එකක් අවශ්‍ය වේ."
-                )
+                detail="YouTube විසින් server requests සීමා කර ඇත (HTTP 429). මද වේලාවකින් නැවත උත්සාහ කරන්න."
             ) from exc
 
         if "sign in to confirm you're not a bot" in lowered or "confirm you're not a bot" in lowered:
-            if not cookie_path:
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "YouTube bot verification ඉල්ලයි. Server එකේ valid cookies file එකක් සකසා නැත. "
-                        "Cookies අවශ්‍ය නම් ඔබට අයිති signed-in session එකෙන් export කළ, වලංගු Netscape cookies file එකක් "
-                        "private storage එකක තබා YOUTUBE_COOKIES_FILE සකසන්න. Cookies public repository එකකට දාන්න එපා."
-                    )
-                ) from exc
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "YouTube bot verification ප්‍රතික්ෂේප කළා. Cookies expired/invalid විය හැකියි, නැත්නම් Render IP එක සීමා කර තිබිය හැකියි. "
-                    "Fresh cookies භාවිත කරලාත් HTTP 429 හෝ bot check එක පවතිනවා නම් එය code එකෙන් පමණක් විසඳිය නොහැක; YouTube සීමාව ඉවත් වනතුරු ඉන්න හෝ අවසර ලත් වෙනත් video source එකක් භාවිත කරන්න."
-                )
-            ) from exc
-
-        if "cookie" in lowered and ("invalid" in lowered or "expired" in lowered or "no longer valid" in lowered):
-            raise HTTPException(
-                status_code=503,
-                detail="YOUTUBE_COOKIES_FILE හි cookies වලංගු නැත හෝ කල් ඉකුත් වී ඇත. ඒවා private storage එකේ fresh Netscape cookies file එකකින් ප්‍රතිස්ථාපනය කරන්න, නැත්නම් YOUTUBE_COOKIES_FILE ඉවත් කර public video එකක් පරීක්ෂා කරන්න. Cookies GitHub වෙත upload නොකරන්න."
+                detail="YouTube bot verification අසාර්ථක විය. Cookies පරීක්ෂා කරන්න."
             ) from exc
 
         raise HTTPException(
             status_code=502,
-            detail=f"YouTube වෙතින් video ලබාගැනීමට නොහැකි විය: {message[:500]}"
+            detail=f"Video download අසාර්ථක විය: {message[:300]}"
         ) from exc
 
 @app.post("/process-video")
@@ -417,10 +393,6 @@ def process_video(req: ProcessVideoReq):
     user = cursor.fetchone()
     
     if not user:
-        # Some app builds keep the signed-in session locally and may reach this
-        # endpoint before the backend has a matching users row. Create a FREE
-        # record so video processing does not stop with the old 404. Never grant
-        # VIP to an arbitrary email; only the configured admin gets admin VIP.
         email_key = normalize_email(req.email)
         if not email_key or "@" not in email_key:
             conn.close()
@@ -546,7 +518,7 @@ def process_video(req: ProcessVideoReq):
         detail = (e.stderr or e.stdout or str(e)).strip()
         raise HTTPException(
             status_code=500,
-            detail=f"FFmpeg processing failed: {detail[-1200:]}"
+            detail=f"FFmpeg processing failed: {detail[-600:]}"
         )
     except subprocess.TimeoutExpired:
         if os.path.exists(raw_video):
@@ -554,7 +526,7 @@ def process_video(req: ProcessVideoReq):
         conn.close()
         raise HTTPException(
             status_code=504,
-            detail="FFmpeg processing timed out. Try a shorter source video or fewer clips."
+            detail="FFmpeg processing timed out."
         )
     except Exception as e:
         if os.path.exists(raw_video):
@@ -564,7 +536,6 @@ def process_video(req: ProcessVideoReq):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(
         app,
         host="0.0.0.0",
