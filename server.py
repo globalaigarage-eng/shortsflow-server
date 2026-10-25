@@ -13,16 +13,38 @@ import yt_dlp
 
 app = FastAPI(title="ShortsFlow Universal AI Backend")
 
+# Render configuration. Keep this URL aligned with the existing Render service.
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL", "https://shortsflow-server.onrender.com"
+).strip().rstrip("/")
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Prefer the FFmpeg binary installed by render-build.sh.
+FFMPEG_DIR = "/opt/render/project/.render/ffmpeg"
+FFMPEG_BIN = os.path.join(FFMPEG_DIR, "ffmpeg")
+if not (os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)):
+    FFMPEG_BIN = "ffmpeg"
+
 @app.get("/")
 def root():
     return {"service": "ShortsFlow AI Backend", "status": "online", "health": "/health", "docs": "/docs"}
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    if os.path.isabs(FFMPEG_BIN):
+        ffmpeg_available = os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)
+    else:
+        import shutil
+        ffmpeg_available = shutil.which(FFMPEG_BIN) is not None
+    return {
+        "status": "ok",
+        "ffmpeg_available": ffmpeg_available,
+        "public_base_url_configured": bool(PUBLIC_BASE_URL),
+    }
 
-OUTPUT_DIR = "output"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
@@ -78,7 +100,7 @@ init_db()
 # --- Gemini Smart Title & Hooks ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
-    fallback_title = f"🔥 {clean_title} (Must Watch)"
+    fallback_title = f"ðŸ”¥ {clean_title} (Must Watch)"
 
     if not GEMINI_API_KEY:
         return {
@@ -148,15 +170,15 @@ def register(req: AuthReq):
         cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
         if cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=403, detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!")
+            raise HTTPException(status_code=403, detail="à¶¸à·™à¶¸ à¶¯à·”à¶»à¶šà¶®à¶±à¶ºà·™à¶±à·Š à¶¯à·à¶±à¶§à¶¸à¶­à·Š Free à¶œà·’à¶«à·”à¶¸à¶šà·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­!")
 
     try:
         cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?, ?)", 
                        (user_email, req.password, current_month, req.device_id))
         conn.commit()
-        return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
+        return {"status": "success", "message": "à¶œà·’à¶«à·”à¶¸ à·ƒà·à¶¯à¶± à¶½à¶¯à·“!"}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
+        raise HTTPException(status_code=400, detail="à¶¸à·™à¶¸ Email à¶‘à¶š à¶¯à·à¶±à¶§à¶¸à¶­à·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­.")
     finally:
         conn.close()
 
@@ -170,7 +192,7 @@ def login(req: AuthReq):
     conn.close()
     
     if not user:
-        raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
+        raise HTTPException(status_code=401, detail="Email à·„à· Password à·€à·à¶»à¶¯à·’à¶ºà·’.")
     
     email, is_vip, vip_expiry, clips_used = user
     if is_vip and vip_expiry and datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
@@ -193,11 +215,11 @@ def forgot_password(req: ForgotReq):
     conn.close()
 
     if not user:
-        raise HTTPException(status_code=404, detail="Email ලිපිනය හමු නොවීය.")
+        raise HTTPException(status_code=404, detail="Email à¶½à·’à¶´à·’à¶±à¶º à·„à¶¸à·” à¶±à·œà·€à·“à¶º.")
 
     otp = str(random.randint(100000, 999999))
     otp_storage[req.email.lower().strip()] = otp
-    return {"status": "success", "message": "OTP කේතය Email වෙත යවන ලදී (Demo: " + otp + ")"}
+    return {"status": "success", "message": "OTP à¶šà·šà¶­à¶º Email à·€à·™à¶­ à¶ºà·€à¶± à¶½à¶¯à·“ (Demo: " + otp + ")"}
 
 @app.post("/auth/reset-password")
 def reset_password(req: ResetReq):
@@ -205,7 +227,7 @@ def reset_password(req: ResetReq):
     stored_otp = otp_storage.get(target_email)
 
     if not stored_otp or stored_otp != req.otp.strip():
-        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි.")
+        raise HTTPException(status_code=400, detail="OTP à¶…à¶‚à¶šà¶º à·€à·à¶»à¶¯à·’à¶ºà·’.")
 
     conn = sqlite3.connect("shortsflow.db")
     cursor = conn.cursor()
@@ -214,12 +236,12 @@ def reset_password(req: ResetReq):
     conn.close()
 
     del otp_storage[target_email]
-    return {"status": "success", "message": "Password යාවත්කාලීන විය!"}
+    return {"status": "success", "message": "Password à¶ºà·à·€à¶­à·Šà¶šà·à¶½à·“à¶± à·€à·’à¶º!"}
 
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
     if not ADMIN_EMAIL or not ADMIN_PASSWORD or req.admin_email.lower().strip() != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="අවසර නැත.")
+        raise HTTPException(status_code=403, detail="à¶…à·€à·ƒà¶» à¶±à·à¶­.")
     
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = sqlite3.connect("shortsflow.db")
@@ -228,7 +250,7 @@ def activate_vip(req: ActivateVipReq):
                    (expiry, req.target_user_email.lower().strip()))
     conn.commit()
     conn.close()
-    return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
+    return {"status": "success", "message": f"{req.target_user_email} VIP à·ƒà¶šà·Šâ€à¶»à·“à¶º à·€à·’à¶º!"}
 
 # --- Video ID Extractor ---
 def extract_youtube_id(url: str):
@@ -256,9 +278,13 @@ def download_media_stream(url: str, output_path: str):
     # yt-dlp needs a real, readable Netscape-format cookies file to use cookies.
     cookie_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
     if not cookie_path:
-        local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-        if os.path.isfile(local_cookie_path):
-            cookie_path = local_cookie_path
+        # Supports either common filename. The file must still be valid
+        # Netscape-format cookies exported from your own browser session.
+        for cookie_name in ("cookies.txt", "cookies.file"):
+            local_cookie_path = os.path.join(PROJECT_DIR, cookie_name)
+            if os.path.isfile(local_cookie_path):
+                cookie_path = local_cookie_path
+                break
 
     ydl_opts = {
         "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
@@ -267,9 +293,17 @@ def download_media_stream(url: str, output_path: str):
         "quiet": False,
         "no_warnings": False,
         "socket_timeout": 30,
-        "retries": 2,
-        "fragment_retries": 2,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 2,
         "noplaylist": True,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            )
+        },
     }
 
     if cookie_path:
@@ -317,20 +351,20 @@ def process_video(req: ProcessVideoReq):
     
     if not user:
         conn.close()
-        raise HTTPException(status_code=404, detail="User හමු නොවීය.")
+        raise HTTPException(status_code=404, detail="User à·„à¶¸à·” à¶±à·œà·€à·“à¶º.")
     
     is_vip, clips_used = user[0], user[1] or 0
 
     max_per_link = 10 if is_vip else 2
     if req.clip_count < 1 or req.clip_count > max_per_link:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"වීඩියෝ 1 සිට {max_per_link} දක්වා තෝරන්න.")
+        raise HTTPException(status_code=403, detail=f"à·€à·“à¶©à·’à¶ºà· 1 à·ƒà·’à¶§ {max_per_link} à¶¯à¶šà·Šà·€à· à¶­à·à¶»à¶±à·Šà¶±.")
 
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
+        raise HTTPException(status_code=403, detail=f"Free à¶¸à·à·ƒà·’à¶š à·ƒà·“à¶¸à·à·€ (à·€à·“à¶©à·’à¶ºà· 30) à¶…à·€à·ƒà¶±à·Š! (à¶¯à·à¶±à¶§: {clips_used}). VIP à¶½à¶¶à·à¶œà¶±à·Šà¶±.")
 
-    raw_video = f"temp_{int(datetime.now().timestamp())}.mp4"
+    raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
 
     try:
@@ -349,7 +383,18 @@ def process_video(req: ProcessVideoReq):
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             meta = generate_metadata_with_gemini(video_title, i)
-            title_text = meta.get("title", "").replace("'", "").replace(":", "")
+            title_text = (
+                meta.get("title", "")
+                .replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace(":", "\\:")
+                .replace("%", "\\%")
+                .replace("[", "\\[")
+                .replace("]", "\\]")
+                .replace(",", "\\,")
+                .replace(";", "\\;")
+                .replace("\\n", " ")
+            )
 
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
@@ -359,22 +404,22 @@ def process_video(req: ProcessVideoReq):
             )
 
             if not is_vip:
-                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
+                vf_filter = base_filter + ",drawtext=text='âœ¨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = base_filter
 
             cmd = [
-                "ffmpeg", "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
+                FFMPEG_BIN, "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
                 "-t", str(clip_duration),
                 "-filter_complex", vf_filter,
                 "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-threads", "2",
                 "-c:a", "aac", "-b:a", "128k",
                 final_path
             ]
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, timeout=240, capture_output=True, text=True)
 
             output_data.append({
-                "clip_url": f"https://shortsflow-server.onrender.com/output/{clip_name}",
+                "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
                 "title": meta.get("title", ""),
                 "description": meta.get("description", ""),
                 "hashtags": meta.get("hashtags", "")
@@ -390,6 +435,23 @@ def process_video(req: ProcessVideoReq):
 
         return {"status": "success", "results": output_data}
 
+    except subprocess.CalledProcessError as e:
+        if os.path.exists(raw_video):
+            os.remove(raw_video)
+        conn.close()
+        detail = (e.stderr or e.stdout or str(e)).strip()
+        raise HTTPException(
+            status_code=500,
+            detail=f"FFmpeg processing failed: {detail[-1200:]}"
+        )
+    except subprocess.TimeoutExpired:
+        if os.path.exists(raw_video):
+            os.remove(raw_video)
+        conn.close()
+        raise HTTPException(
+            status_code=504,
+            detail="FFmpeg processing timed out. Try a shorter source video or fewer clips."
+        )
     except Exception as e:
         if os.path.exists(raw_video):
             os.remove(raw_video)
