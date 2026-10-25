@@ -6,11 +6,23 @@ import shutil
 import json
 import random
 import urllib.request
+import urllib.error
+import math
+import logging
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 import yt_dlp
+
+# ============================================================
+# APP / LOGGING
+# ============================================================
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("shortsflow")
 
 app = FastAPI(title="ShortsFlow Universal AI Backend")
 
@@ -19,42 +31,8 @@ PUBLIC_BASE_URL = os.environ.get(
 ).strip().rstrip("/")
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# --- Auto Setup YouTube Cookies ---
-YOUTUBE_COOKIES_CONTENT = """# Netscape HTTP Cookie File
-# https://curl.haxx.se/rfc/cookie_spec.html
-# This is a generated file! Do not edit.
-
-.youtube.com	TRUE	/	TRUE	1806541023	__Secure-BUCKET	CAA
-.youtube.com	TRUE	/	TRUE	1826967284	LOGIN_INFO	AFmmF2swRAIgJFGuBLvE1WM6CdHvTp1GyLePYLCl_d4yTWenlSuyUSUCIGr3CJA7fh0uIj4MpX0V-v6C-mR5wtTy52enqGOsLQEt:QUQ3MjNmeDlfUlE4VjZEdy0tZzZrTUlrUkx4c3lnUmJWRjNiWW5uM0NzbW1kSGNyam85OUNsWkJJU3JCYXNlQjFjUDdCcUZIOUY0OVFSNVZBLUFJZDZjT1IyNzUxN1ZrVW1yLUZ1c0o0Y1FVZVFvbWVmNi1pY1hTY2RQZW8tNjFJMnlncVJKTEhmRC1IamhicjJkMjVSSFpKNHFjejNxcEJn
-.youtube.com	TRUE	/	TRUE	1827488711	PREF	f6=40000000&tz=Asia.Colombo&f7=140
-.youtube.com	TRUE	/	FALSE	1827413136	SID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmQsq5j6wgYKwrg2e-MpC8xQACgYKAYsSARISFQHGX2MiRcWhXvMcLFUUedBNY9j1VxoVAUF8yKoO7ZH8TvVSSdZNztszAJeM0076
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-1PSID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmDHCzLAwpzmU-nhYVmpotogACgYKATsSARISFQHGX2MifLMBhXpJYWZ9pnwn4Kv3hhoVAUF8yKqwlEh282ce4zZMkzukQQth0076
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-3PSID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmxetittpqeBqdOeFF6BzbyAACgYKAUESARISFQHGX2MipWwXvsnWHm_DgWEl0H3UHRoVAUF8yKqY12ewy0-X474i5_9xdF8Q0076
-.youtube.com	TRUE	/	FALSE	1827413136	HSID	A-L2rwjijeBhp-f1c
-.youtube.com	TRUE	/	TRUE	1827413136	SSID	ATawqqMoJalvUEHhg
-.youtube.com	TRUE	/	FALSE	1827413136	APISID	q69FTQSPSSvMznSH/AoEmRy5EsxSJDoGIf
-.youtube.com	TRUE	/	TRUE	1827413136	SAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-1PAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-3PAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-1PSIDTS	sidts-CjUBkldj_w7O-8zKo1ZipMsXpsoXrq1rkT1PasCk7jMd3q3DoL9bJOdnq9YZFnlS7FZuoA7K4BAA
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-3PSIDTS	sidts-CjUBkldj_w7O-8zKo1ZipMsXpsoXrq1rkT1PasCk7jMd3q3DoL9bJOdnq9YZFnlS7FZuoA7K4BAA
-.youtube.com	TRUE	/	FALSE	1824467723	SIDCC	APD_SKHFsH6vBHy-O_pQaqAXCRCz7ucGJqsk-a_DdoyxjMoTCbmTvQFodaO1Mk4RVLcrSJ6lGw
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-1PSIDCC	APD_SKHuKG5f66gxoff4nRRdqLo9bVf1BHppgLqp5IzTtuLfViIesIz9caYAnJqAZVT-pyib6e8
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-3PSIDCC	APD_SKF2KTeoEQwYkiyqf2wXh7GD7aItBG0EbUzTcBiZJYoZ-Bzz1VOju1EaUMJoLrYWyK0Qcg
-.youtube.com	TRUE	/	TRUE	1808480709	VISITOR_INFO1_LIVE	yhxEadWk0xc
-.youtube.com	TRUE	/	TRUE	1808480709	VISITOR_PRIVACY_METADATA	CgJMSxIEGgAgFw%3D%3D
-.youtube.com	TRUE	/	TRUE	1808475616	__Secure-YNID	Cu0BCAUSnwEB8QZuZkxxV6PqYj4KsUFGTzOgb_NEn2vDWEEYsBzpyDIJh5xw1KvDPDca2_uqg6ZwUeZd8gl950cRRoNWBBsm-YNfVwT-9BVh0_9rqYR7qeV4NkzEmnJossZbc3XwcPU_GgdrniZA5KQhU9C4yL8WZZBCv9Vu7CFFDL_AnJD1-62mcO_97RqqTeoP_Godp_-KCnAbYXDcLMbrJRbmmSIoBTJFAd6pnU8vngRfbfS8IV1pOcV2LUnsQhKq8v_Ad823Bus1J4BsIkq0pIxz4LVwHuKt2EfmK_mRJVrZmbg4A7Q2uJWJSakP
-.youtube.com	TRUE	/	TRUE	1808475616	__Secure-ROLLOUT_TOKEN	CN7lz5299oL5QRDB4p_f6rGWAxi9qt75-NSXAw%3D%3D
-.youtube.com	TRUE	/	TRUE	0	YSC	bWw2jQp5cBs
-"""
-
-COOKIE_PATH = os.path.join(PROJECT_DIR, "cookies.txt")
-try:
-    with open(COOKIE_PATH, "w", encoding="utf-8") as f:
-        f.write(YOUTUBE_COOKIES_CONTENT.strip())
-except Exception as e:
-    pass
+OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 DB_PATH = os.environ.get(
     "SHORTSFLOW_DB_PATH", os.path.join(PROJECT_DIR, "shortsflow.db")
@@ -62,34 +40,91 @@ DB_PATH = os.environ.get(
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
 
-_LEGACY_DB_PATH = os.path.abspath("shortsflow.db")
-if (
-    not os.path.exists(DB_PATH)
-    and os.path.isfile(_LEGACY_DB_PATH)
-    and os.path.abspath(_LEGACY_DB_PATH) != os.path.abspath(DB_PATH)
-):
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    shutil.copy2(_LEGACY_DB_PATH, DB_PATH)
+FFMPEG_DIR = "/opt/render/project/.render/ffmpeg"
+FFMPEG_CANDIDATE = os.path.join(FFMPEG_DIR, "ffmpeg")
+if os.path.isfile(FFMPEG_CANDIDATE) and os.access(FFMPEG_CANDIDATE, os.X_OK):
+    FFMPEG_BIN = FFMPEG_CANDIDATE
+else:
+    FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().casefold()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+# In-memory OTP storage is for demo use only. It resets when the server restarts.
+otp_storage: dict[str, dict[str, Any]] = {}
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def normalize_email(email: Any) -> str:
+    return str(email or "").strip().casefold()
+
+
+def safe_remove(path: str | None) -> None:
+    if path and os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            logger.warning("Could not remove temporary file: %s", path)
+
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
-def normalize_email(email: str) -> str:
-    return (email or "").strip().casefold()
 
-OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def read_json_body(body: Any) -> dict:
+    """Read JSON object without triggering FastAPI's required-field 422 validation."""
+    if not isinstance(body, dict):
+        return {}
+    return body
 
-FFMPEG_DIR = "/opt/render/project/.render/ffmpeg"
-FFMPEG_BIN = os.path.join(FFMPEG_DIR, "ffmpeg")
-if not (os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)):
-    FFMPEG_BIN = "ffmpeg"
+
+def get_first_string(data: dict, *keys: str) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value is not None:
+            value = str(value).strip()
+            if value:
+                return value
+    return ""
+
+
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH) or PROJECT_DIR, exist_ok=True)
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                password TEXT,
+                is_vip INTEGER DEFAULT 0,
+                vip_expiry TEXT,
+                monthly_clips_used INTEGER DEFAULT 0,
+                last_reset_month TEXT,
+                device_id TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+init_db()
+
+
+# ============================================================
+# BASIC ROUTES
+# ============================================================
 
 @app.get("/")
 def root():
-    return {"service": "ShortsFlow AI Backend", "status": "online", "health": "/health", "docs": "/docs"}
+    return {"service": "ShortsFlow AI Backend", "status": "online"}
+
 
 @app.get("/health")
 def health():
@@ -97,445 +132,696 @@ def health():
         ffmpeg_available = os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)
     else:
         ffmpeg_available = shutil.which(FFMPEG_BIN) is not None
+
     return {
         "status": "ok",
         "ffmpeg_available": ffmpeg_available,
         "public_base_url_configured": bool(PUBLIC_BASE_URL),
+        "database_configured": bool(DB_PATH),
     }
+
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().lower()
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-otp_storage = {}
+# ============================================================
+# GEMINI METADATA
+# ============================================================
 
-# --- Database Setup ---
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            email TEXT PRIMARY KEY,
-            password TEXT,
-            is_vip INTEGER DEFAULT 0,
-            vip_expiry TEXT,
-            monthly_clips_used INTEGER DEFAULT 0,
-            last_reset_month TEXT,
-            device_id TEXT
-        )
-    """)
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN monthly_clips_used INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
-    except sqlite3.OperationalError:
-        pass
+def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: int):
+    clean_title = re.sub(r"[^\w\s-]", "", video_title or "Social Video")[:40].strip()
+    if not clean_title:
+        clean_title = "Social Video"
 
-    if ADMIN_EMAIL and ADMIN_PASSWORD:
-        cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(ADMIN_EMAIL),))
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO users (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
-                "VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')",
-                (normalize_email(ADMIN_EMAIL), ADMIN_PASSWORD, datetime.now().strftime("%Y-%m"))
-            )
-        else:
-            cursor.execute(
-                "UPDATE users SET password = ?, is_vip = 1, vip_expiry = '2099-12-31' "
-                "WHERE LOWER(TRIM(email)) = ?",
-                (ADMIN_PASSWORD, normalize_email(ADMIN_EMAIL))
-            )
-    
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# --- Gemini Smart Title & Hooks ---
-def generate_metadata_with_gemini(video_title: str, clip_index: int):
-    clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
-    fallback_title = f"🔥 {clean_title} (Must Watch)"
+    suffix = f" (Part {part_num})" if total_parts > 1 else ""
+    fallback_title = f"🔥 {clean_title}{suffix}"
 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Highlight moment from {clean_title}! Share and follow.",
-            "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
+            "description": f"Highlight clip from {clean_title}! Share, like and follow.",
+            "hashtags": "#Shorts #Viral #Trending #FYP #Reels",
         }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    )
     prompt = f"""
-    Create a viral Title (under 45 chars) with an emoji for: "{video_title}".
-    Do NOT include Part 1 or Clip 1.
-    Respond ONLY in strict JSON:
-    {{
-        "title": "Dramatic Title",
-        "description": "Engaging 2-sentence description",
-        "hashtags": "#Shorts #Viral #Trending #FYP"
-    }}
-    """
-    headers = {"Content-Type": "application/json"}
+Video topic: "{video_title}". Part {part_num} of {total_parts}.
+Create a catchy social-video title under 45 characters.
+Respond ONLY in strict JSON with these keys:
+"title", "description", "hashtags".
+"""
+
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
     try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-        with urllib.request.urlopen(req, timeout=8) as response:
-            res_data = json.loads(response.read().decode('utf-8'))
-            raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
-            clean_text = raw_text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean_text)
+        with urllib.request.urlopen(request, timeout=12) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+
+        candidates = response_data.get("candidates") or []
+        raw_text = candidates[0]["content"]["parts"][0]["text"]
+        clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+        metadata = json.loads(clean_text)
+
+        return {
+            "title": str(metadata.get("title") or fallback_title)[:100],
+            "description": str(
+                metadata.get("description") or f"Highlight clip from {clean_title}."
+            )[:1000],
+            "hashtags": str(metadata.get("hashtags") or "#Shorts #Viral #Trending")[:500],
+        }
     except Exception:
+        logger.exception("Gemini metadata generation failed; using fallback")
         return {
             "title": fallback_title,
-            "description": f"Must see clip from {clean_title}!",
-            "hashtags": "#Shorts #Viral #Trending #FYP"
+            "description": f"Must-see clip from {clean_title}!",
+            "hashtags": "#Viral #Trending #FYP #Reels #Shorts",
         }
 
-class AuthReq(BaseModel):
-    email: str
-    password: str
-    device_id: str = "UNKNOWN"
 
-class ForgotReq(BaseModel):
-    email: str
-
-class ResetReq(BaseModel):
-    email: str
-    otp: str
-    new_password: str
-
-class ActivateVipReq(BaseModel):
-    admin_email: str
-    target_user_email: str
-
-class ProcessVideoReq(BaseModel):
-    email: str
-    youtube_url: str
-    clip_count: int
+# ============================================================
+# AUTH
+# ============================================================
 
 @app.post("/auth/register")
-def register(req: AuthReq):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    current_month = datetime.now().strftime("%Y-%m")
-    user_email = normalize_email(req.email)
-    
-    if user_email != ADMIN_EMAIL.lower() and req.device_id and req.device_id != "UNKNOWN":
-        cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
-        if cursor.fetchone():
-            conn.close()
-            raise HTTPException(status_code=403, detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!")
-
+async def register(request: Request):
     try:
-        cursor.execute(
-            "INSERT INTO users (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
-            "VALUES (?, ?, 0, NULL, 0, ?, ?)",
-            (user_email, req.password, current_month, req.device_id)
-        )
-        conn.commit()
+        data = read_json_body(await request.json())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request එක වලංගු JSON එකක් නොවේ.")
+
+    email = normalize_email(get_first_string(data, "email", "user_email"))
+    password = get_first_string(data, "password")
+    device_id = get_first_string(data, "device_id") or "UNKNOWN"
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="වලංගු Email ලිපිනයක් ඇතුළත් කරන්න.")
+    if not password:
+        raise HTTPException(status_code=400, detail="Password එක අවශ්‍යයි.")
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        current_month = datetime.now().strftime("%Y-%m")
+
+        if email != normalize_email(ADMIN_EMAIL) and device_id != "UNKNOWN":
+            cursor.execute("SELECT email FROM users WHERE device_id = ?", (device_id,))
+            if cursor.fetchone():
+                raise HTTPException(
+                    status_code=403,
+                    detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!",
+                )
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO users
+                (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id)
+                VALUES (?, ?, 0, NULL, 0, ?, ?)
+                """,
+                (email, password, current_month, device_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
+
         return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
     finally:
         conn.close()
 
+
 @app.post("/auth/login")
-def login(req: AuthReq):
+async def login(request: Request):
+    try:
+        data = read_json_body(await request.json())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request එක වලංගු JSON එකක් නොවේ.")
+
+    email = normalize_email(get_first_string(data, "email", "user_email"))
+    password = get_first_string(data, "password")
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email සහ Password අවශ්‍යයි.")
+
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT email, is_vip, vip_expiry, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ? AND password = ?", 
-                   (normalize_email(req.email), req.password))
-    user = cursor.fetchone()
-    conn.close()
-    
-    if not user:
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT email, password, is_vip, vip_expiry, monthly_clips_used
+            FROM users WHERE LOWER(TRIM(email)) = ?
+            """,
+            (email,),
+        )
+        user = cursor.fetchone()
+    finally:
+        conn.close()
+
+    if not user or user[1] != password:
         raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
-    
-    email, is_vip, vip_expiry, clips_used = user
-    if is_vip and vip_expiry and datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
-        is_vip = 0
-            
+
+    user_email, _, is_vip, vip_expiry, clips_used = user
+    if is_vip and vip_expiry:
+        try:
+            if datetime.now().date() > datetime.strptime(vip_expiry, "%Y-%m-%d").date():
+                is_vip = 0
+        except ValueError:
+            is_vip = 0
+
     return {
         "status": "success",
-        "email": email,
+        "email": user_email,
         "is_vip": bool(is_vip),
-        "is_admin": (normalize_email(email) == normalize_email(ADMIN_EMAIL) if ADMIN_EMAIL else False),
-        "links_used": clips_used
+        "is_admin": bool(ADMIN_EMAIL) and normalize_email(user_email) == normalize_email(ADMIN_EMAIL),
+        "links_used": clips_used or 0,
     }
 
+
 @app.post("/auth/forgot-password")
-def forgot_password(req: ForgotReq):
+async def forgot_password(request: Request):
+    try:
+        data = read_json_body(await request.json())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request එක වලංගු JSON එකක් නොවේ.")
+
+    email = normalize_email(get_first_string(data, "email", "user_email"))
+    if not email:
+        raise HTTPException(status_code=400, detail="Email ලිපිනය ඇතුළත් කරන්න.")
+
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
-    user = cursor.fetchone()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (email,))
+        user = cursor.fetchone()
+    finally:
+        conn.close()
 
     if not user:
         raise HTTPException(status_code=404, detail="Email ලිපිනය හමු නොවීය.")
 
     otp = str(random.randint(100000, 999999))
-    otp_storage[normalize_email(req.email)] = otp
-    return {"status": "success", "message": "OTP කේතය Email වෙත යවන ලදී (Demo: " + otp + ")"}
+    otp_storage[email] = {
+        "otp": otp,
+        "expires_at": datetime.now() + timedelta(minutes=10),
+    }
+
+    # Demo only: this does not actually send an email.
+    # Configure an email provider before using this in production.
+    return {
+        "status": "success",
+        "message": "Demo OTP එක ජනනය කරන ලදී. සැබෑ Email එකක් යැවීමට email service එකක් සම්බන්ධ කරන්න.",
+        "demo_otp": otp,
+    }
+
 
 @app.post("/auth/reset-password")
-def reset_password(req: ResetReq):
-    target_email = normalize_email(req.email)
-    stored_otp = otp_storage.get(target_email)
+async def reset_password(request: Request):
+    try:
+        data = read_json_body(await request.json())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request එක වලංගු JSON එකක් නොවේ.")
 
-    if not stored_otp or stored_otp != req.otp.strip():
-        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි.")
+    email = normalize_email(get_first_string(data, "email", "user_email"))
+    otp = get_first_string(data, "otp")
+    new_password = get_first_string(data, "new_password", "password")
+
+    if not email or not otp or not new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Email, OTP සහ අලුත් Password එක අවශ්‍යයි.",
+        )
+
+    stored = otp_storage.get(email)
+    if (
+        not stored
+        or stored.get("otp") != otp
+        or datetime.now() > stored.get("expires_at", datetime.min)
+    ):
+        otp_storage.pop(email, None)
+        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි හෝ කල් ඉකුත් වී ඇත.")
 
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET password = ? WHERE email = ?", (req.new_password, target_email))
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET password = ? WHERE email = ?", (new_password, email))
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User හමු නොවීය.")
+    finally:
+        conn.close()
 
-    del otp_storage[target_email]
+    otp_storage.pop(email, None)
     return {"status": "success", "message": "Password යාවත්කාලීන විය!"}
 
+
+# ============================================================
+# ADMIN VIP
+# ============================================================
+
 @app.post("/admin/activate-vip")
-def activate_vip(req: ActivateVipReq):
-    if not ADMIN_EMAIL or not ADMIN_PASSWORD or normalize_email(req.admin_email) != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="අවසර නැත.")
-    
+async def activate_vip(request: Request):
+    try:
+        data = read_json_body(await request.json())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request එක වලංගු JSON එකක් නොවේ.")
+
+    supplied_admin_email = normalize_email(
+        get_first_string(data, "admin_email", "email")
+    )
+    supplied_admin_password = get_first_string(data, "admin_password")
+    target_user_email = normalize_email(
+        get_first_string(data, "target_user_email", "user_email", "target_email")
+    )
+
+    if not ADMIN_EMAIL or not ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=500,
+            detail="Server එකේ ADMIN_EMAIL සහ ADMIN_PASSWORD Environment Variables සකසා නැත.",
+        )
+
+    if (
+        supplied_admin_email != normalize_email(ADMIN_EMAIL)
+        or supplied_admin_password != ADMIN_PASSWORD
+    ):
+        raise HTTPException(status_code=403, detail="Admin අවසර නැත.")
+
+    if not target_user_email:
+        raise HTTPException(status_code=400, detail="VIP සක්‍රීය කළ යුතු User Email එක ඇතුළත් කරන්න.")
+
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET is_vip = 1, vip_expiry = ? WHERE email = ?", 
-                   (expiry, normalize_email(req.target_user_email)))
-    conn.commit()
-    conn.close()
-    return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET is_vip = 1, vip_expiry = ? WHERE LOWER(TRIM(email)) = ?",
+            (expiry, target_user_email),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="මෙම Email එකට User කෙනෙක් හමු නොවීය.")
+    finally:
+        conn.close()
 
-def extract_youtube_id(url: str):
-    patterns = [
-        r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
+    return {
+        "status": "success",
+        "message": f"{target_user_email} VIP සක්‍රීය විය!",
+        "vip_expiry": expiry,
+    }
 
-def download_media_stream(url: str, output_path: str):
+
+# ============================================================
+# SOCIAL VIDEO DOWNLOAD
+# ============================================================
+
+def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
-        raise HTTPException(status_code=400, detail="කරුණාකර video URL එකක් ඇතුළත් කරන්න.")
+        raise HTTPException(status_code=400, detail="කරුණාකර video link එකක් ඇතුළත් කරන්න.")
 
-    video_id = extract_youtube_id(clean_url)
-    target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
+    if not re.match(r"^https?://", clean_url, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="http:// හෝ https:// සහිත වලංගු link එකක් දෙන්න.")
+
+    host = re.sub(r"^www\.", "", clean_url.split("/")[2].split(":")[0].lower())
+    blocked_hosts = {"youtube.com", "m.youtube.com", "youtu.be", "music.youtube.com"}
+    if host in blocked_hosts or host.endswith(".youtube.com"):
+        raise HTTPException(
+            status_code=400,
+            detail="YouTube සහය නොදක්වයි. Facebook, TikTok, Instagram, X හෝ Pinterest link එකක් දෙන්න.",
+        )
 
     ydl_opts = {
-        "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
+        "format": "bestvideo+bestaudio/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
-        "no_warnings": False,
-        "socket_timeout": 30,
-        "retries": 2,
-        "fragment_retries": 2,
-        "extractor_retries": 2,
+        "no_warnings": True,
+        "socket_timeout": 35,
+        "retries": 3,
         "noplaylist": True,
+        "merge_output_format": "mp4",
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        }
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        },
     }
-
-    deno_path = os.environ.get("DENO_BIN", "/opt/render/project/.render/deno/bin/deno").strip()
-    if deno_path and os.path.isfile(deno_path) and os.access(deno_path, os.X_OK):
-        ydl_opts["js_runtimes"] = {"deno": {"path": deno_path}}
-
-    if os.path.isfile(COOKIE_PATH) and os.access(COOKIE_PATH, os.R_OK):
-        ydl_opts["cookiefile"] = COOKIE_PATH
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target_url, download=True)
+            info = ydl.extract_info(clean_url, download=True)
             if not info:
-                raise RuntimeError("yt-dlp returned no video information")
-            title = info.get("title") or "Viral Clip"
-            duration = int(info.get("duration") or 180)
+                raise RuntimeError("No video information extracted")
+
+            downloaded_path = ydl.prepare_filename(info)
+            # yt-dlp may change the extension when it merges audio/video.
+            candidates = [
+                output_path,
+                os.path.splitext(output_path)[0] + ".mp4",
+                os.path.splitext(downloaded_path)[0] + ".mp4",
+                downloaded_path,
+            ]
+            actual_path = next((p for p in candidates if os.path.isfile(p)), None)
+            if actual_path is None:
+                raise RuntimeError("Downloaded video file was not found")
+
+            if actual_path != output_path:
+                shutil.move(actual_path, output_path)
+
+            title = info.get("title") or "Viral Social Video"
+            duration = max(1, int(info.get("duration") or 60))
             return title, duration
+
     except HTTPException:
         raise
     except Exception as exc:
-        message = str(exc)
-        lowered = message.lower()
-
-        if "429" in lowered or "too many requests" in lowered:
-            raise HTTPException(
-                status_code=429,
-                detail="YouTube විසින් server requests සීමා කර ඇත (HTTP 429). මද වේලාවකින් නැවත උත්සාහ කරන්න."
-            ) from exc
-
-        if "sign in to confirm you're not a bot" in lowered or "confirm you're not a bot" in lowered:
-            raise HTTPException(
-                status_code=503,
-                detail="YouTube bot verification අසාර්ථක විය. Cookies පරීක්ෂා කරන්න."
-            ) from exc
-
+        logger.exception("Video download failed")
         raise HTTPException(
             status_code=502,
-            detail=f"Video download අසාර්ථක විය: {message[:300]}"
+            detail=f"වීඩියෝව බාගත කිරීම අසාර්ථක විය: {str(exc)[:220]}",
         ) from exc
 
+
+# ============================================================
+# VIDEO PROCESSING
+# ============================================================
+
+def escape_drawtext(text: str) -> str:
+    """Escape user/AI-generated text for FFmpeg drawtext."""
+    text = str(text or "").replace("\n", " ").replace("\r", " ")
+    replacements = {
+        "\\": r"\\",
+        "'": r"\'",
+        ":": r"\:",
+        "%": r"\%",
+        "[": r"\[",
+        "]": r"\]",
+        ",": r"\,",
+        ";": r"\;",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text[:35]
+
+
 @app.post("/process-video")
-def process_video(req: ProcessVideoReq):
+async def process_video(request: Request):
+    # Request is intentionally used instead of a required Pydantic body model.
+    # This prevents FastAPI's automatic 422 "body field missing" error when the
+    # client sends an empty/incorrect JSON payload; we return a readable 400 instead.
+    try:
+        body = read_json_body(await request.json())
+    except Exception:
+        body = {}
+
+    user_email = normalize_email(
+        get_first_string(body, "email", "user_email", "userEmail")
+    )
+    url_to_process = get_first_string(
+        body,
+        "video_url",
+        "youtube_url",
+        "url",
+        "social_video_url",
+        "videoUrl",
+        "link",
+    )
+
+    if not user_email:
+        raise HTTPException(
+            status_code=400,
+            detail="User email එක අවශ්‍යයි. Request JSON එකට email field එක එක් කරන්න.",
+        )
+    if not url_to_process:
+        raise HTTPException(
+            status_code=400,
+            detail="Video URL එක අවශ්‍යයි. video_url field එකට link එක යවන්න.",
+        )
+
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
-    user = cursor.fetchone()
-    
-    if not user:
-        email_key = normalize_email(req.email)
-        if not email_key or "@" not in email_key:
-            conn.close()
-            raise HTTPException(status_code=400, detail="වලංගු email ලිපිනයක් අවශ්‍යයි.")
-        is_admin_email = bool(ADMIN_EMAIL) and email_key == normalize_email(ADMIN_EMAIL)
-        try:
-            cursor.execute(
-                "INSERT OR IGNORE INTO users "
-                "(email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
-                "VALUES (?, NULL, ?, ?, 0, ?, ?)",
-                (
-                    email_key,
-                    1 if is_admin_email else 0,
-                    "2099-12-31" if is_admin_email else None,
-                    datetime.now().strftime("%Y-%m"),
-                    "ADMIN_DEVICE" if is_admin_email else None,
-                ),
-            )
-            conn.commit()
-            cursor.execute(
-                "SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?",
-                (email_key,),
-            )
-            user = cursor.fetchone()
-        except sqlite3.Error as exc:
-            conn.close()
-            raise HTTPException(status_code=500, detail=f"User record එක සකස් කිරීමට නොහැකි විය: {exc}")
-        if not user:
-            conn.close()
-            raise HTTPException(status_code=500, detail="User record එක සකස් කිරීමට නොහැකි විය.")
-
-    is_vip, clips_used = user[0], user[1] or 0
-
-    max_per_link = 10 if is_vip else 2
-    if req.clip_count < 1 or req.clip_count > max_per_link:
-        conn.close()
-        raise HTTPException(status_code=403, detail=f"වීඩියෝ 1 සිට {max_per_link} දක්වා තෝරන්න.")
-
-    if not is_vip and (clips_used + req.clip_count) > 30:
-        conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
-
-    raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
+    raw_video = os.path.join(
+        PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4"
+    )
     output_data = []
 
     try:
-        video_title, total_duration = download_media_stream(req.youtube_url, raw_video)
-        
-        clip_duration = 30
-        usable_duration = max(total_duration - 15, clip_duration * req.clip_count)
-        step_interval = usable_duration // (req.clip_count + 1)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT is_vip, vip_expiry, monthly_clips_used, last_reset_month
+            FROM users WHERE LOWER(TRIM(email)) = ?
+            """,
+            (user_email,),
+        )
+        user = cursor.fetchone()
 
-        for i in range(req.clip_count):
-            start_sec = 8 + (step_interval * (i + 1))
-            if start_sec + clip_duration > total_duration:
-                start_sec = max(0, total_duration - clip_duration - (i * 2))
+        # Keep compatibility with the earlier app behaviour: the configured admin
+        # email may be created automatically. Other unknown emails must log in/register.
+        if not user:
+            is_admin_email = bool(ADMIN_EMAIL) and user_email == normalize_email(ADMIN_EMAIL)
+            if not is_admin_email:
+                raise HTTPException(
+                    status_code=401,
+                    detail="මෙම Email එක ලියාපදිංචි වී නැත. පළමුව Register/Login වන්න.",
+                )
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO users
+                (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id)
+                VALUES (?, NULL, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')
+                """,
+                (user_email, datetime.now().strftime("%Y-%m")),
+            )
+            conn.commit()
+            cursor.execute(
+                """
+                SELECT is_vip, vip_expiry, monthly_clips_used, last_reset_month
+                FROM users WHERE LOWER(TRIM(email)) = ?
+                """,
+                (user_email,),
+            )
+            user = cursor.fetchone()
 
-            clip_name = f"clip_{int(datetime.now().timestamp())}_{i+1}.mp4"
-            final_path = os.path.join(OUTPUT_DIR, clip_name)
+        is_vip, vip_expiry, clips_used, last_reset_month = user
+        clips_used = int(clips_used or 0)
+        current_month = datetime.now().strftime("%Y-%m")
 
-            meta = generate_metadata_with_gemini(video_title, i)
-            title_text = (
-                meta.get("title", "")
-                .replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace(":", "\\:")
-                .replace("%", "\\%")
-                .replace("[", "\\[")
-                .replace("]", "\\]")
-                .replace(",", "\\,")
-                .replace(";", "\\;")
-                .replace("\\n", " ")
+        if last_reset_month != current_month:
+            clips_used = 0
+            cursor.execute(
+                "UPDATE users SET monthly_clips_used = 0, last_reset_month = ? WHERE email = ?",
+                (current_month, user_email),
+            )
+            conn.commit()
+
+        if is_vip and vip_expiry:
+            try:
+                if datetime.now().date() > datetime.strptime(vip_expiry, "%Y-%m-%d").date():
+                    is_vip = 0
+                    cursor.execute(
+                        "UPDATE users SET is_vip = 0 WHERE email = ?", (user_email,)
+                    )
+                    conn.commit()
+            except ValueError:
+                is_vip = 0
+
+        if not is_vip and clips_used >= 15:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට: {clips_used}). PRO VIP ලබාගන්න.",
             )
 
+        if not shutil.which(FFMPEG_BIN) and not (
+            os.path.isabs(FFMPEG_BIN)
+            and os.path.isfile(FFMPEG_BIN)
+            and os.access(FFMPEG_BIN, os.X_OK)
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail="Server එකේ FFmpeg install වී නැත. Render build settings පරීක්ෂා කරන්න.",
+            )
+
+        video_title, total_duration = download_social_video(url_to_process, raw_video)
+
+        if not is_vip and total_duration > 600:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. "
+                    "Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
+                ),
+            )
+
+        part_duration = 180
+        total_parts = max(1, math.ceil(total_duration / part_duration))
+        parts_to_generate = total_parts
+
+        if not is_vip:
+            remaining_quota = max(0, 15 - clips_used)
+            parts_to_generate = min(total_parts, remaining_quota)
+
+        for i in range(parts_to_generate):
+            start_sec = i * part_duration
+            current_clip_len = min(part_duration, total_duration - start_sec)
+            if current_clip_len <= 3:
+                continue
+
+            clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}_{random.randint(1000,9999)}.mp4"
+            final_path = os.path.join(OUTPUT_DIR, clip_name)
+
+            meta = generate_metadata_with_gemini(video_title, i + 1, total_parts)
+            title_text = escape_drawtext(meta.get("title", ""))
+
             base_filter = (
-                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
-                "[0:v]scale=720:-1[fg];"
+                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+                "crop=720:1280,boxblur=15:5[bg];"
+                "[0:v]scale=720:-1,setsar=1,"
+                "eq=brightness=0.03:saturation=1.12:contrast=1.05,"
+                "setpts=0.97*PTS[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2[combined];"
-                f"[combined]drawtext=text='{title_text[:35]}':fontcolor=yellow:fontsize=36:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=120"
+                f"[combined]drawtext=text='{title_text}':"
+                "fontcolor=yellow:fontsize=36:box=1:boxcolor=black@0.65:"
+                "boxborderw=10:x=(w-text_w)/2:y=120[vout]"
             )
 
             if not is_vip:
-                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
+                vf_filter = (
+                    base_filter
+                    + ";[vout]drawtext=text='ShortsFlow AI':"
+                    "x=w-tw-25:y=h-th-40:fontsize=22:"
+                    "fontcolor=white@0.55:shadowcolor=black@0.4:"
+                    "shadowx=2:shadowy=2[vfinal]"
+                )
+                video_map = "[vfinal]"
             else:
                 vf_filter = base_filter
+                video_map = "[vout]"
 
-            cmd = [
-                FFMPEG_BIN, "-y", "-ss", str(timedelta(seconds=int(start_sec))), "-i", raw_video, 
-                "-t", str(clip_duration),
-                "-filter_complex", vf_filter,
-                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-threads", "2",
-                "-c:a", "aac", "-b:a", "128k",
-                final_path
+            command = [
+                FFMPEG_BIN,
+                "-y",
+                "-ss",
+                str(start_sec),
+                "-i",
+                raw_video,
+                "-t",
+                str(int(current_clip_len)),
+                "-filter_complex",
+                vf_filter,
+                "-map",
+                video_map,
+                "-map",
+                "0:a?",
+                "-af",
+                "atempo=1.03,volume=1.05",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "22",
+                "-preset",
+                "veryfast",
+                "-threads",
+                "2",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                "-map_metadata",
+                "-1",
+                final_path,
             ]
-            subprocess.run(cmd, check=True, timeout=240, capture_output=True, text=True)
 
-            output_data.append({
-                "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
-                "title": meta.get("title", ""),
-                "description": meta.get("description", ""),
-                "hashtags": meta.get("hashtags", "")
-            })
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    timeout=240,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.TimeoutExpired:
+                safe_remove(final_path)
+                raise HTTPException(
+                    status_code=504,
+                    detail="වීඩියෝ සැකසීමට වැඩි කාලයක් ගත විය. කෙටි වීඩියෝවක් උත්සාහ කරන්න.",
+                )
+            except subprocess.CalledProcessError as exc:
+                safe_remove(final_path)
+                error_text = (exc.stderr or exc.stdout or str(exc)).strip()
+                logger.error("FFmpeg failed: %s", error_text[-1500:])
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"FFmpeg error: {error_text[-350:]}",
+                )
+
+            output_data.append(
+                {
+                    "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
+                    "title": meta.get("title", ""),
+                    "description": meta.get("description", ""),
+                    "hashtags": meta.get("hashtags", ""),
+                }
+            )
+
+        if not output_data:
+            raise HTTPException(
+                status_code=400,
+                detail="සැකසීමට ප්‍රමාණවත් දිගක වීඩියෝ කොටසක් හමු නොවීය.",
+            )
 
         if not is_vip:
-            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE LOWER(TRIM(email)) = ?", (req.clip_count, normalize_email(req.email)))
+            cursor.execute(
+                """
+                UPDATE users
+                SET monthly_clips_used = COALESCE(monthly_clips_used, 0) + ?,
+                    last_reset_month = ?
+                WHERE LOWER(TRIM(email)) = ?
+                """,
+                (len(output_data), current_month, user_email),
+            )
             conn.commit()
-
-        conn.close()
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
 
         return {"status": "success", "results": output_data}
 
     except HTTPException:
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
-        conn.close()
         raise
-    except subprocess.CalledProcessError as e:
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
-        conn.close()
-        detail = (e.stderr or e.stdout or str(e)).strip()
+    except sqlite3.Error as exc:
+        logger.exception("Database error during video processing")
+        raise HTTPException(status_code=500, detail="Database error. Server logs පරීක්ෂා කරන්න.") from exc
+    except Exception as exc:
+        logger.exception("Unexpected process-video error")
         raise HTTPException(
             status_code=500,
-            detail=f"FFmpeg processing failed: {detail[-600:]}"
-        )
-    except subprocess.TimeoutExpired:
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
+            detail=f"වීඩියෝව සැකසීමේදී අනපේක්ෂිත දෝෂයක් ඇති විය: {str(exc)[:200]}",
+        ) from exc
+    finally:
+        safe_remove(raw_video)
         conn.close()
-        raise HTTPException(
-            status_code=504,
-            detail="FFmpeg processing timed out."
-        )
-    except Exception as e:
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
-        conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Return JSON errors consistently.
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=exc.headers,
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         app,
         host="0.0.0.0",
