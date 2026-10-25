@@ -21,12 +21,28 @@ PUBLIC_BASE_URL = os.environ.get(
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# IMPORTANT: use the same SQLite path that the original server used.
-# All auth, VIP activation, and video-processing endpoints must share this DB.
-# Do not switch to a second DB_PATH, otherwise login and /process-video can
-# see different user tables and /process-video returns "user record not found".
+# Keep SQLite in one stable location. On Render, attach a persistent disk
+# mounted at /var/data and set SHORTSFLOW_DB_PATH=/var/data/shortsflow.db;
+# otherwise the free ephemeral filesystem can lose user/VIP records on redeploy.
+DB_PATH = os.environ.get(
+    "SHORTSFLOW_DB_PATH", os.path.join(PROJECT_DIR, "shortsflow.db")
+).strip()
+if not os.path.isabs(DB_PATH):
+    DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
+
+# One-time compatibility: if an older deployment created the DB in its
+# working directory, copy it to the stable path rather than silently losing users.
+_LEGACY_DB_PATH = os.path.abspath("shortsflow.db")
+if (
+    not os.path.exists(DB_PATH)
+    and os.path.isfile(_LEGACY_DB_PATH)
+    and os.path.abspath(_LEGACY_DB_PATH) != os.path.abspath(DB_PATH)
+):
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    shutil.copy2(_LEGACY_DB_PATH, DB_PATH)
+
 def get_db_connection():
-    conn = sqlite3.connect("shortsflow.db", timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
@@ -94,16 +110,18 @@ def init_db():
     # Admin credentials must be configured as Render environment variables.
     # Do not create an admin account with an empty/default password.
     if ADMIN_EMAIL and ADMIN_PASSWORD:
-        cursor.execute("SELECT email FROM users WHERE email = ?", (ADMIN_EMAIL,))
+        cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(ADMIN_EMAIL),))
         if not cursor.fetchone():
             cursor.execute(
-                "INSERT INTO users VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')",
-                (ADMIN_EMAIL, ADMIN_PASSWORD, datetime.now().strftime("%Y-%m"))
+                "INSERT INTO users (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
+                "VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')",
+                (normalize_email(ADMIN_EMAIL), ADMIN_PASSWORD, datetime.now().strftime("%Y-%m"))
             )
         else:
             cursor.execute(
-                "UPDATE users SET password = ? WHERE email = ?",
-                (ADMIN_PASSWORD, ADMIN_EMAIL)
+                "UPDATE users SET password = ?, is_vip = 1, vip_expiry = '2099-12-31' "
+                "WHERE LOWER(TRIM(email)) = ?",
+                (ADMIN_PASSWORD, normalize_email(ADMIN_EMAIL))
             )
     
     conn.commit()
@@ -187,8 +205,11 @@ def register(req: AuthReq):
             raise HTTPException(status_code=403, detail="à¶¸à·™à¶¸ à¶¯à·”à¶»à¶šà¶®à¶±à¶ºà·™à¶±à·Š à¶¯à·à¶±à¶§à¶¸à¶­à·Š Free à¶œà·’à¶«à·”à¶¸à¶šà·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­!")
 
     try:
-        cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?, ?)", 
-                       (user_email, req.password, current_month, req.device_id))
+        cursor.execute(
+            "INSERT INTO users (email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
+            "VALUES (?, ?, 0, NULL, 0, ?, ?)",
+            (user_email, req.password, current_month, req.device_id)
+        )
         conn.commit()
         return {"status": "success", "message": "à¶œà·’à¶«à·”à¶¸ à·ƒà·à¶¯à¶± à¶½à¶¯à·“!"}
     except sqlite3.IntegrityError:
@@ -216,7 +237,7 @@ def login(req: AuthReq):
         "status": "success",
         "email": email,
         "is_vip": bool(is_vip),
-        "is_admin": (email.lower() == ADMIN_EMAIL.lower()),
+        "is_admin": (normalize_email(email) == normalize_email(ADMIN_EMAIL) if ADMIN_EMAIL else False),
         "links_used": clips_used
     }
 
@@ -364,9 +385,41 @@ def process_video(req: ProcessVideoReq):
     user = cursor.fetchone()
     
     if not user:
-        conn.close()
-        raise HTTPException(status_code=404, detail="à¶¸à·™à¶¸ email à¶‘à¶šà¶§ user record à¶‘à¶š database à¶‘à¶šà·š à¶±à·à¶­. Login à·ƒà·„ video request à¶‘à¶š à¶‘à¶šà¶¸ email/database à¶‘à¶š à¶·à·à·€à·’à¶­ à¶šà¶»à¶±à·€à·à¶¯ à¶¶à¶½à¶±à·Šà¶±.")
-    
+        # Some app builds keep the signed-in session locally and may reach this
+        # endpoint before the backend has a matching users row. Create a FREE
+        # record so video processing does not stop with the old 404. Never grant
+        # VIP to an arbitrary email; only the configured admin gets admin VIP.
+        email_key = normalize_email(req.email)
+        if not email_key or "@" not in email_key:
+            conn.close()
+            raise HTTPException(status_code=400, detail="à·€à¶½à¶‚à¶œà·” email à¶½à·’à¶´à·’à¶±à¶ºà¶šà·Š à¶…à·€à·à·Šâ€à¶ºà¶ºà·’.")
+        is_admin_email = bool(ADMIN_EMAIL) and email_key == normalize_email(ADMIN_EMAIL)
+        try:
+            cursor.execute(
+                "INSERT OR IGNORE INTO users "
+                "(email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id) "
+                "VALUES (?, NULL, ?, ?, 0, ?, ?)",
+                (
+                    email_key,
+                    1 if is_admin_email else 0,
+                    "2099-12-31" if is_admin_email else None,
+                    datetime.now().strftime("%Y-%m"),
+                    "ADMIN_DEVICE" if is_admin_email else None,
+                ),
+            )
+            conn.commit()
+            cursor.execute(
+                "SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?",
+                (email_key,),
+            )
+            user = cursor.fetchone()
+        except sqlite3.Error as exc:
+            conn.close()
+            raise HTTPException(status_code=500, detail=f"User record à¶‘à¶š à·ƒà¶šà·ƒà·Š à¶šà·’à¶»à·“à¶¸à¶§ à¶±à·œà·„à·à¶šà·’ à·€à·’à¶º: {exc}")
+        if not user:
+            conn.close()
+            raise HTTPException(status_code=500, detail="User record à¶‘à¶š à·ƒà¶šà·ƒà·Š à¶šà·’à¶»à·“à¶¸à¶§ à¶±à·œà·„à·à¶šà·’ à·€à·’à¶º.")
+
     is_vip, clips_used = user[0], user[1] or 0
 
     max_per_link = 10 if is_vip else 2
@@ -440,7 +493,7 @@ def process_video(req: ProcessVideoReq):
             })
 
         if not is_vip:
-            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE email = ?", (req.clip_count, normalize_email(req.email)))
+            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE LOWER(TRIM(email)) = ?", (req.clip_count, normalize_email(req.email)))
             conn.commit()
 
         conn.close()
