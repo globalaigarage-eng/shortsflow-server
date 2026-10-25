@@ -54,7 +54,7 @@ if not (os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)):
 
 @app.get("/")
 def root():
-    return {"service": "ShortsFlow AI Backend", "status": "online", "health": "/health"}
+    return {"service": "ShortsFlow AI Backend", "status": "online", "mode": "multi_social_no_yt"}
 
 @app.get("/health")
 def health():
@@ -103,19 +103,19 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Highlight clip from {clean_title}! Share, like and follow for more.",
+            "description": f"Must watch highlight from {clean_title}! Share, like and follow for more.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
-    Video topic: "{video_title}". Part {part_num} of {total_parts}.
+    Video title: "{video_title}". Part {part_num} of {total_parts}.
     Create a viral Title (under 45 chars) with an emoji ending with "{suffix}".
     Respond ONLY in strict JSON:
     {{
         "title": "Title with emoji{suffix}",
         "description": "Engaging 2-sentence description summarizing this part",
-        "hashtags": "#Shorts #Viral #Trending #FYP"
+        "hashtags": "#Viral #Trending #FYP #Reels #Shorts"
     }}
     """
     headers = {"Content-Type": "application/json"}
@@ -132,7 +132,7 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
         return {
             "title": fallback_title,
             "description": f"Must see clip from {clean_title}!",
-            "hashtags": "#Shorts #Viral #Trending #FYP"
+            "hashtags": "#Viral #Trending #FYP #Reels"
         }
 
 class AuthReq(BaseModel):
@@ -154,8 +154,7 @@ class ActivateVipReq(BaseModel):
 
 class ProcessVideoReq(BaseModel):
     email: str
-    youtube_url: str
-    clip_count: int = 1
+    video_url: str
 
 @app.post("/auth/register")
 def register(req: AuthReq):
@@ -253,59 +252,18 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-def extract_youtube_id(url: str):
-    patterns = [
-        r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-def download_media_stream(url: str, output_path: str):
+# --- Social Video Downloader (No YouTube) ---
+def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
-        raise HTTPException(status_code=400, detail="කරුණාකර video URL එකක් ඇතුළත් කරන්න.")
+        raise HTTPException(status_code=400, detail="කරුණාකර video link එකක් ඇතුළත් කරන්න.")
 
-    video_id = extract_youtube_id(clean_url)
-
-    if video_id:
-        stream_resolvers = [
-            f"https://api.piped.private.coffee/streams/{video_id}",
-            f"https://pipedapi.kavin.rocks/streams/{video_id}",
-            f"https://vid.priv.au/api/v1/videos/{video_id}",
-            f"https://inv.nadeko.net/api/v1/videos/{video_id}"
-        ]
-
-        for api_url in stream_resolvers:
-            try:
-                req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=7) as res:
-                    data = json.loads(res.read().decode('utf-8'))
-                    title = data.get("title", "Viral Video")
-                    duration = int(data.get("duration", data.get("lengthSeconds", 60)))
-
-                    direct_stream_url = None
-                    if "videoStreams" in data:
-                        for s in data["videoStreams"]:
-                            if s.get("format") == "MPEG_4" or "mp4" in s.get("mimeType", ""):
-                                direct_stream_url = s.get("url")
-                                break
-                    elif "formatStreams" in data:
-                        for s in data["formatStreams"]:
-                            if "mp4" in s.get("type", ""):
-                                direct_stream_url = s.get("url")
-                                break
-
-                    if direct_stream_url:
-                        cmd = [FFMPEG_BIN, "-y", "-i", direct_stream_url, "-c", "copy", output_path]
-                        subprocess.run(cmd, check=True, timeout=180)
-                        return title, duration
-            except Exception:
-                continue
-
-    target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
+    # YouTube Link Block කිරීම
+    if "youtube.com" in clean_url or "youtu.be" in clean_url:
+        raise HTTPException(
+            status_code=400, 
+            detail="YouTube සහය නොදක්වයි. කරුණාකර Facebook Reels, TikTok, Instagram Reels, Twitter (X), Pinterest හෝ Reddit වීඩියෝ link එකක් ලබා දෙන්න."
+        )
 
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
@@ -313,27 +271,27 @@ def download_media_stream(url: str, output_path: str):
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 30,
+        "socket_timeout": 35,
         "retries": 3,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target_url, download=True)
+            info = ydl.extract_info(clean_url, download=True)
             if not info:
                 raise RuntimeError("No video information extracted")
-            title = info.get("title") or "Viral Reel"
+            title = info.get("title") or "Viral Social Video"
             duration = int(info.get("duration") or 60)
             return title, duration
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"වීඩියෝව බාගත කළ නොහැකි විය: {str(exc)[:250]}"
+            detail=f"වීඩියෝව බාගත කිරීම අසාර්ථක විය (Public Link එකක් දැයි පරීක්ෂා කරන්න): {str(exc)[:250]}"
         ) from exc
 
 @app.post("/process-video")
@@ -371,33 +329,46 @@ def process_video(req: ProcessVideoReq):
 
     is_vip, clips_used = user[0], user[1] or 0
 
-    if not is_vip and clips_used >= 30:
+    # මාසික Free Limit පරීක්ෂාව (වීඩියෝ 15 සීමාව)
+    if not is_vip and clips_used >= 15:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! VIP ලබාගන්න.")
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට සාදා ඇත: {clips_used}). Unlimited වීඩියෝ සෑදීමට PRO VIP ලබාගන්න."
+        )
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
 
     try:
-        video_title, total_duration = download_media_stream(req.youtube_url, raw_video)
-        
-        # විනාඩි 3 (තත්පර 180) බැගින් කොටස් ගණන ගණනය කිරීම
+        video_title, total_duration = download_social_video(req.video_url, raw_video)
+
+        # Free අයට උපරිම විනාඩි 10 (තත්පර 600)
+        if not is_vip and total_duration > 600:
+            raise HTTPException(
+                status_code=403,
+                detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration/60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි. විනාඩි 10 ට වැඩි දිග වීඩියෝ සඳහා VIP ලබාගන්න."
+            )
+
+        # විනාඩි 3 (තත්පර 180) බැගින් Parts වලට වෙන් කිරීම
         PART_DURATION = 180
         total_parts = math.ceil(total_duration / PART_DURATION)
         if total_parts < 1:
             total_parts = 1
 
-        # Free අයට උපරිම කොටස් 3 (විනාඩි 9 දක්වා), VIP අයට සම්පූර්ණ වීඩියෝව
-        if not is_vip and total_parts > 3:
-            total_parts = 3
+        # Free අයට ඉතිරි quota එක අනුව parts සීමා කිරීම
+        parts_to_generate = total_parts
+        if not is_vip:
+            remaining_quota = 15 - clips_used
+            parts_to_generate = min(total_parts, remaining_quota)
 
-        for i in range(total_parts):
+        for i in range(parts_to_generate):
             start_sec = i * PART_DURATION
             current_clip_len = min(PART_DURATION, total_duration - start_sec)
-            if current_clip_len <= 5:
+            if current_clip_len <= 3:
                 break
 
-            clip_name = f"part_{int(datetime.now().timestamp())}_{i+1}.mp4"
+            clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i+1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             meta = generate_metadata_with_gemini(video_title, i + 1, total_parts)
@@ -414,7 +385,7 @@ def process_video(req: ProcessVideoReq):
                 .replace("\\n", " ")
             )
 
-            # Anti-Copyright AI Bypass Filter
+            # Anti-Copyright Repurpose Filter Complex
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
                 "[0:v]scale=720:-1,eq=brightness=0.03:saturation=1.12:contrast=1.05,setpts=0.97*PTS[fg];"
@@ -432,8 +403,8 @@ def process_video(req: ProcessVideoReq):
                 "-t", str(int(current_clip_len)),
                 "-filter_complex", vf_filter,
                 "-af", "atempo=1.03,volume=1.05",
-                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-threads", "2",
-                "-c:a", "aac", "-b:a", "128k",
+                "-c:v", "libx264", "-crf", "22", "-preset", "veryfast", "-threads", "2",
+                "-c:a", "aac", "-b:a", "192k",
                 "-map_metadata", "-1",
                 final_path
             ]
@@ -446,8 +417,9 @@ def process_video(req: ProcessVideoReq):
                 "hashtags": meta.get("hashtags", "")
             })
 
+        # හැදුනු parts ගණන මාසික ගිණුමෙන් අඩු කිරීම
         if not is_vip:
-            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + 1 WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
+            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE LOWER(TRIM(email)) = ?", (len(output_data), normalize_email(req.email)))
             conn.commit()
 
         conn.close()
