@@ -20,42 +20,6 @@ PUBLIC_BASE_URL = os.environ.get(
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- Auto Setup YouTube Cookies ---
-YOUTUBE_COOKIES_CONTENT = """# Netscape HTTP Cookie File
-# https://curl.haxx.se/rfc/cookie_spec.html
-# This is a generated file! Do not edit.
-
-.youtube.com	TRUE	/	TRUE	1806541023	__Secure-BUCKET	CAA
-.youtube.com	TRUE	/	TRUE	1826967284	LOGIN_INFO	AFmmF2swRAIgJFGuBLvE1WM6CdHvTp1GyLePYLCl_d4yTWenlSuyUSUCIGr3CJA7fh0uIj4MpX0V-v6C-mR5wtTy52enqGOsLQEt:QUQ3MjNmeDlfUlE4VjZEdy0tZzZrTUlrUkx4c3lnUmJWRjNiWW5uM0NzbW1kSGNyam85OUNsWkJJU3JCYXNlQjFjUDdCcUZIOUY0OVFSNVZBLUFJZDZjT1IyNzUxN1ZrVW1yLUZ1c0o0Y1FVZVFvbWVmNi1pY1hTY2RQZW8tNjFJMnlncVJKTEhmRC1IamhicjJkMjVSSFpKNHFjejNxcEJn
-.youtube.com	TRUE	/	TRUE	1827488711	PREF	f6=40000000&tz=Asia.Colombo&f7=140
-.youtube.com	TRUE	/	FALSE	1827413136	SID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmQsq5j6wgYKwrg2e-MpC8xQACgYKAYsSARISFQHGX2MiRcWhXvMcLFUUedBNY9j1VxoVAUF8yKoO7ZH8TvVSSdZNztszAJeM0076
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-1PSID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmDHCzLAwpzmU-nhYVmpotogACgYKATsSARISFQHGX2MifLMBhXpJYWZ9pnwn4Kv3hhoVAUF8yKqwlEh282ce4zZMkzukQQth0076
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-3PSID	g.a000EAnL0eMW2xpM7bvjROSBoE3i4rCRa0bAfQcajW3cRzQgu6YmxetittpqeBqdOeFF6BzbyAACgYKAUESARISFQHGX2MipWwXvsnWHm_DgWEl0H3UHRoVAUF8yKqY12ewy0-X474i5_9xdF8Q0076
-.youtube.com	TRUE	/	FALSE	1827413136	HSID	A-L2rwjijeBhp-f1c
-.youtube.com	TRUE	/	TRUE	1827413136	SSID	ATawqqMoJalvUEHhg
-.youtube.com	TRUE	/	FALSE	1827413136	APISID	q69FTQSPSSvMznSH/AoEmRy5EsxSJDoGIf
-.youtube.com	TRUE	/	TRUE	1827413136	SAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-1PAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
-.youtube.com	TRUE	/	TRUE	1827413136	__Secure-3PAPISID	wToB1DXFpIpe79cX/ABYCUs2ZXnz4xZgPh
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-1PSIDTS	sidts-CjUBkldj_w7O-8zKo1ZipMsXpsoXrq1rkT1PasCk7jMd3q3DoL9bJOdnq9YZFnlS7FZuoA7K4BAA
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-3PSIDTS	sidts-CjUBkldj_w7O-8zKo1ZipMsXpsoXrq1rkT1PasCk7jMd3q3DoL9bJOdnq9YZFnlS7FZuoA7K4BAA
-.youtube.com	TRUE	/	FALSE	1824467723	SIDCC	APD_SKHFsH6vBHy-O_pQaqAXCRCz7ucGJqsk-a_DdoyxjMoTCbmTvQFodaO1Mk4RVLcrSJ6lGw
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-1PSIDCC	APD_SKHuKG5f66gxoff4nRRdqLo9bVf1BHppgLqp5IzTtuLfViIesIz9caYAnJqAZVT-pyib6e8
-.youtube.com	TRUE	/	TRUE	1824467723	__Secure-3PSIDCC	APD_SKF2KTeoEQwYkiyqf2wXh7GD7aItBG0EbUzTcBiZJYoZ-Bzz1VOju1EaUMJoLrYWyK0Qcg
-.youtube.com	TRUE	/	TRUE	1808480709	VISITOR_INFO1_LIVE	yhxEadWk0xc
-.youtube.com	TRUE	/	TRUE	1808480709	VISITOR_PRIVACY_METADATA	CgJMSxIEGgAgFw%3D%3D
-.youtube.com	TRUE	/	TRUE	1808475616	__Secure-YNID	Cu0BCAUSnwEB8QZuZkxxV6PqYj4KsUFGTzOgb_NEn2vDWEEYsBzpyDIJh5xw1KvDPDca2_uqg6ZwUeZd8gl950cRRoNWBBsm-YNfVwT-9BVh0_9rqYR7qeV4NkzEmnJossZbc3XwcPU_GgdrniZA5KQhU9C4yL8WZZBCv9Vu7CFFDL_AnJD1-62mcO_97RqqTeoP_Godp_-KCnAbYXDcLMbrJRbmmSIoBTJFAd6pnU8vngRfbfS8IV1pOcV2LUnsQhKq8v_Ad823Bus1J4BsIkq0pIxz4LVwHuKt2EfmK_mRJVrZmbg4A7Q2uJWJSakP
-.youtube.com	TRUE	/	TRUE	1808475616	__Secure-ROLLOUT_TOKEN	CN7lz5299oL5QRDB4p_f6rGWAxi9qt75-NSXAw%3D%3D
-.youtube.com	TRUE	/	TRUE	0	YSC	bWw2jQp5cBs
-"""
-
-COOKIE_PATH = os.path.join(PROJECT_DIR, "cookies.txt")
-try:
-    with open(COOKIE_PATH, "w", encoding="utf-8") as f:
-        f.write(YOUTUBE_COOKIES_CONTENT.strip())
-except Exception:
-    pass
-
 DB_PATH = os.environ.get(
     "SHORTSFLOW_DB_PATH", os.path.join(PROJECT_DIR, "shortsflow.db")
 ).strip()
@@ -321,21 +285,66 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
+# --- YouTube HTTP 429 & Format Block Bypass Downloader ---
 def download_media_stream(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
         raise HTTPException(status_code=400, detail="කරුණාකර video URL එකක් ඇතුළත් කරන්න.")
 
     video_id = extract_youtube_id(clean_url)
-    target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
 
-    # Universal robust video format query + mobile client bypass
+    # 1. YouTube නම්: Render IP එක කෙලින්ම YouTube වලට නොයවා Public Stream Resolvers හරහා බාගත කිරීම
+    if video_id:
+        stream_resolvers = [
+            f"https://api.piped.private.coffee/streams/{video_id}",
+            f"https://pipedapi.kavin.rocks/streams/{video_id}",
+            f"https://vid.priv.au/api/v1/videos/{video_id}",
+            f"https://inv.nadeko.net/api/v1/videos/{video_id}"
+        ]
+
+        for api_url in stream_resolvers:
+            try:
+                req = urllib.request.Request(
+                    api_url, 
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                )
+                with urllib.request.urlopen(req, timeout=9) as res:
+                    data = json.loads(res.read().decode('utf-8'))
+                    title = data.get("title", "Viral Highlight")
+                    duration = int(data.get("duration", data.get("lengthSeconds", 180)))
+
+                    direct_stream_url = None
+                    # Piped format check
+                    if "videoStreams" in data:
+                        for s in data["videoStreams"]:
+                            if s.get("format") == "MPEG_4" or "mp4" in s.get("mimeType", ""):
+                                direct_stream_url = s.get("url")
+                                break
+                    # Invidious format check
+                    elif "formatStreams" in data:
+                        for s in data["formatStreams"]:
+                            if "mp4" in s.get("type", ""):
+                                direct_stream_url = s.get("url")
+                                break
+
+                    if direct_stream_url:
+                        # FFmpeg මඟින් stream එක සෘජුවම MP4 ලෙස copy කර බාගත කිරීම
+                        cmd = [FFMPEG_BIN, "-y", "-i", direct_stream_url, "-c", "copy", "-t", "360", output_path]
+                        subprocess.run(cmd, check=True, timeout=120)
+                        return title, duration
+            except Exception:
+                continue
+
+    # 2. Facebook, TikTok, Instagram හෝ Direct Extraction
+    target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
+    cookie_path = os.path.join(PROJECT_DIR, "cookies.txt")
+
     ydl_opts = {
-        "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
+        "format": "bestvideo+bestaudio/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
-        "no_warnings": False,
+        "no_warnings": True,
         "socket_timeout": 30,
         "retries": 3,
         "fragment_retries": 3,
@@ -343,46 +352,29 @@ def download_media_stream(url: str, output_path: str):
         "merge_output_format": "mp4",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "web"]
+                "player_client": ["android", "ios", "mweb"]
             }
         },
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
         }
     }
 
-    if os.path.isfile(COOKIE_PATH) and os.access(COOKIE_PATH, os.R_OK):
-        ydl_opts["cookiefile"] = COOKIE_PATH
+    if os.path.isfile(cookie_path) and os.access(cookie_path, os.R_OK):
+        ydl_opts["cookiefile"] = cookie_path
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(target_url, download=True)
             if not info:
-                raise RuntimeError("yt-dlp returned no video information")
+                raise RuntimeError("yt-dlp returned no video info")
             title = info.get("title") or "Viral Clip"
             duration = int(info.get("duration") or 180)
             return title, duration
-    except HTTPException:
-        raise
     except Exception as exc:
-        message = str(exc)
-        lowered = message.lower()
-
-        if "429" in lowered or "too many requests" in lowered:
-            raise HTTPException(
-                status_code=429,
-                detail="YouTube විසින් server requests සීමා කර ඇත (HTTP 429). මද වේලාවකින් නැවත උත්සාහ කරන්න."
-            ) from exc
-
-        if "sign in to confirm you're not a bot" in lowered or "confirm you're not a bot" in lowered:
-            raise HTTPException(
-                status_code=503,
-                detail="YouTube bot verification අසාර්ථක විය. Cookies පරීක්ෂා කරන්න."
-            ) from exc
-
         raise HTTPException(
             status_code=502,
-            detail=f"Video download අසාර්ථක විය: {message[:300]}"
+            detail=f"Video download අසාර්ථක විය: {str(exc)[:300]}"
         ) from exc
 
 @app.post("/process-video")
@@ -433,7 +425,7 @@ def process_video(req: ProcessVideoReq):
 
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
+        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! VIP ලබාගන්න.")
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
