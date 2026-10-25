@@ -220,24 +220,7 @@ def download_social_video(url: str, output_path: str):
         actual_path = next((p for p in candidates if os.path.isfile(p)), output_path)
         if actual_path != output_path and os.path.isfile(actual_path):
             shutil.move(actual_path, output_path)
-        
-        duration = float(info.get("duration") or 0)
-        if duration <= 1:
-            # ffprobe මඟින් නිවැරදි duration එක ලබා ගැනීම
-            try:
-                cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                duration = float(res.stdout.strip())
-            except Exception:
-                duration = 60.0
-
-        return info.get("title") or "Viral Video", max(5.0, duration)
-
-def escape_drawtext(text: str) -> str:
-    text = str(text or "").replace("\n", " ").replace("\r", " ")
-    for old, new in {"\\": r"\\", "'": r"\'", ":": r"\:", "%": r"\%", "[": r"\[", "]": r"\]", ",": r"\,", ";": r"\;"}.items():
-        text = text.replace(old, new)
-    return text[:35]
+        return info.get("title") or "Viral Video", max(1, int(info.get("duration") or 60))
 
 @app.post("/process-video")
 async def process_video(request: Request):
@@ -271,7 +254,7 @@ async def process_video(request: Request):
                 detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
             )
 
-        part_duration = 180  # විනාඩි 3 බැගින් කොටස්
+        part_duration = 180
         total_parts = max(1, math.ceil(total_duration / part_duration))
 
         for i in range(total_parts):
@@ -283,30 +266,19 @@ async def process_video(request: Request):
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            title_text = escape_drawtext(video_title)
-
-            base_filter = (
-                "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,crop=720:1280[bg];"
-                "[0:v]scale=720:-1,setsar=1,setpts=0.97*PTS[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2[combined];"
-                f"[combined]drawtext=text='{title_text}':fontcolor=yellow:fontsize=36:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=120[vout]"
-            )
-
+            # කිසිදු drawtext දෝෂයක් නොඑන පරිදි සරලව 725x1280 scale සහ pad කිරීම
+            vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
             if not is_vip:
-                vf_filter = base_filter + ";[vout]drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2[vfinal]"
-                video_map = "[vfinal]"
-            else:
-                vf_filter = base_filter
-                video_map = "[vout]"
+                vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
 
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-filter_complex", vf_filter, "-map", video_map, "-map", "0:a?",
-                "-c:v", "libx264", "-crf", "26", "-preset", "ultrafast", "-threads", "4",
-                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-map_metadata", "-1", final_path,
+                "-vf", vf_filter, "-c:v", "libx264", "-crf", "28",
+                "-preset", "ultrafast", "-threads", "4", "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart", final_path,
             ]
 
-            subprocess.run(command, check=True, timeout=240, capture_output=True, text=True)
+            subprocess.run(command, check=True, timeout=180, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
