@@ -19,7 +19,7 @@ import yt_dlp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("shortsflow")
 
-app = FastAPI(title="ShortsFlow Universal AI Backend")
+app = FastAPI(title="ShortsFlow Social Media AI Backend")
 
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL", "https://shortsflow-server.onrender.com"
@@ -110,7 +110,7 @@ init_db()
 
 @app.get("/")
 def root():
-    return {"service": "ShortsFlow AI Backend", "status": "online"}
+    return {"service": "ShortsFlow Social Media AI Backend", "status": "online"}
 
 @app.get("/health")
 def health():
@@ -200,26 +200,53 @@ async def activate_vip(request: Request):
 
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
+    
+    # TikTok සහ අනෙකුත් සෝෂල් මීඩියා සඳහා විශේෂිත Mobile User-Agent සහ Headers
     ydl_opts = {
-        "format": "best[ext=mp4]/best",
+        "format": "best/bestvideo+bestaudio",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": 60,
         "noplaylist": True,
+        "merge_output_format": "mp4",
+        "extractor_args": {
+            "tiktok": {
+                "app_version": "33.0.0",
+                "api_hostname": "api16-normal-c-useast1a.tiktokv.com"
+            }
+        },
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 TikTok 32.0.0 (iPhone; iOS 17.1.1; Scale/3.00)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Sec-Fetch-Mode": "navigate",
         },
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(clean_url, download=True)
-        downloaded_path = ydl.prepare_filename(info)
-        candidates = [output_path, os.path.splitext(output_path)[0] + ".mp4", downloaded_path]
-        actual_path = next((p for p in candidates if os.path.isfile(p)), output_path)
-        if actual_path != output_path and os.path.isfile(actual_path):
-            shutil.move(actual_path, output_path)
-        return info.get("title") or "Viral Video", max(1, int(info.get("duration") or 60))
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=True)
+            downloaded_path = ydl.prepare_filename(info)
+            candidates = [output_path, os.path.splitext(output_path)[0] + ".mp4", downloaded_path]
+            actual_path = next((p for p in candidates if os.path.isfile(p)), output_path)
+            if actual_path != output_path and os.path.isfile(actual_path):
+                shutil.move(actual_path, output_path)
+            return info.get("title") or "Viral Social Video", max(1, int(info.get("duration") or 60))
+    except Exception as exc:
+        # Fallback ජාල ක්‍රමයක් මඟින් නැවත උත්සාහ කිරීම
+        logger.warning("Primary download failed (%s), trying secondary options...", exc)
+        fallback_opts = {
+            "format": "best",
+            "outtmpl": output_path,
+            "overwrites": True,
+            "quiet": True,
+            "noplaylist": True,
+        }
+        with yt_dlp.YoutubeDL(fallback_opts) as ydl2:
+            info2 = ydl2.extract_info(clean_url, download=True)
+            return info2.get("title") or "Social Video", max(1, int(info2.get("duration") or 60))
 
 def escape_drawtext(text: str) -> str:
     text = str(text or "").replace("\n", " ").replace("\r", " ")
@@ -294,7 +321,6 @@ async def process_video(request: Request):
                 "-movflags", "+faststart", "-map_metadata", "-1", final_path,
             ]
 
-            # Timeout සීමාව තත්පර 300 දක්වා ඉහළ නංවා ඇත
             subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
 
             output_data.append({
@@ -308,7 +334,7 @@ async def process_video(request: Request):
 
     except Exception as exc:
         logger.exception("Processing error")
-        raise HTTPException(status_code=500, detail=f"දෝෂයක් ඇති විය: {str(exc)[:150]}")
+        raise HTTPException(status_code=500, detail=f"දෝෂයක් ඇති විය: {str(exc)[:180]}")
     finally:
         safe_remove(raw_video)
         conn.close()
