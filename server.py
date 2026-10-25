@@ -201,12 +201,12 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best/bestvideo+bestaudio",
+        "format": "best[height<=720]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 60,
+        "socket_timeout": 30,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -220,7 +220,17 @@ def download_social_video(url: str, output_path: str):
         actual_path = next((p for p in candidates if os.path.isfile(p)), output_path)
         if actual_path != output_path and os.path.isfile(actual_path):
             shutil.move(actual_path, output_path)
-        return info.get("title") or "Viral Video", max(1, int(info.get("duration") or 60))
+        
+        duration = float(info.get("duration") or 0)
+        if duration <= 1:
+            try:
+                cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                duration = float(res.stdout.strip())
+            except Exception:
+                duration = 60.0
+
+        return info.get("title") or "Viral Video", max(5.0, duration)
 
 @app.post("/process-video")
 async def process_video(request: Request):
@@ -247,7 +257,6 @@ async def process_video(request: Request):
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        # Free පරිශීලකයින්ට උපරිම විනාඩි 10 (තත්පර 600) සීමාව
         if not is_vip and total_duration > 600:
             raise HTTPException(
                 status_code=403,
@@ -266,19 +275,20 @@ async def process_video(request: Request):
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            # කිසිදු drawtext දෝෂයක් නොඑන පරිදි සරලව 725x1280 scale සහ pad කිරීම
+            # අතිශය වේගවත් ෆිල්ටර් සකස් කිරීම
             vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
             if not is_vip:
                 vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
 
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-vf", vf_filter, "-c:v", "libx264", "-crf", "28",
+                "-vf", vf_filter, "-c:v", "libx264", "-crf", "30",
                 "-preset", "ultrafast", "-threads", "4", "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart", final_path,
             ]
 
-            subprocess.run(command, check=True, timeout=180, capture_output=True, text=True)
+            # Timeout කාලය තත්පර 300 දක්වා ඉහළ නංවා ඇත
+            subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
