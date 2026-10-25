@@ -13,6 +13,14 @@ import yt_dlp
 
 app = FastAPI(title="ShortsFlow Universal AI Backend")
 
+@app.get("/")
+def root():
+    return {"service": "ShortsFlow AI Backend", "status": "online", "health": "/health", "docs": "/docs"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 OUTPUT_DIR = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
@@ -390,4 +398,4 @@ def process_video(req: ProcessVideoReq):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
