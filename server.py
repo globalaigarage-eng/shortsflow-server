@@ -47,8 +47,8 @@ if os.path.isfile(FFMPEG_CANDIDATE) and os.access(FFMPEG_CANDIDATE, os.X_OK):
 else:
     FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
 
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().casefold()
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().casefold()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # In-memory OTP storage is for demo use only. It resets when the server restarts.
@@ -288,6 +288,22 @@ async def login(request: Request):
         raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
 
     user_email, _, is_vip, vip_expiry, clips_used = user
+
+    # Owner/admin account receives VIP automatically after successful login.
+    # Set ADMIN_EMAIL in Render Environment Variables to the exact owner email.
+    if ADMIN_EMAIL and normalize_email(user_email) == normalize_email(ADMIN_EMAIL):
+        is_vip = 1
+        vip_expiry = "2099-12-31"
+        conn = get_db_connection()
+        try:
+            conn.execute(
+                "UPDATE users SET is_vip = 1, vip_expiry = ? WHERE LOWER(TRIM(email)) = ?",
+                (vip_expiry, normalize_email(user_email)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     if is_vip and vip_expiry:
         try:
             if datetime.now().date() > datetime.strptime(vip_expiry, "%Y-%m-%d").date():
@@ -613,6 +629,16 @@ async def process_video(request: Request):
         is_vip, vip_expiry, clips_used, last_reset_month = user
         clips_used = int(clips_used or 0)
         current_month = datetime.now().strftime("%Y-%m")
+
+        # Keep the configured owner account VIP even if its stored flag was Free.
+        if ADMIN_EMAIL and user_email == normalize_email(ADMIN_EMAIL):
+            is_vip = 1
+            vip_expiry = "2099-12-31"
+            cursor.execute(
+                "UPDATE users SET is_vip = 1, vip_expiry = ? WHERE LOWER(TRIM(email)) = ?",
+                (vip_expiry, user_email),
+            )
+            conn.commit()
 
         if last_reset_month != current_month:
             clips_used = 0
