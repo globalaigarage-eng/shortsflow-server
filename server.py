@@ -17,10 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import yt_dlp
 
-# ============================================================
-# APP / LOGGING
-# ============================================================
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("shortsflow")
 
@@ -52,10 +48,6 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 otp_storage: dict[str, dict[str, Any]] = {}
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def normalize_email(email: Any) -> str:
     return str(email or "").strip().casefold()
@@ -101,7 +93,6 @@ def init_db():
                 device_id TEXT
             )
         """)
-        # Admin account auto-init as Lifetime VIP
         if ADMIN_EMAIL:
             cursor = conn.cursor()
             cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(ADMIN_EMAIL),))
@@ -120,10 +111,6 @@ def init_db():
         conn.close()
 
 init_db()
-
-# ============================================================
-# BASIC ROUTES
-# ============================================================
 
 @app.get("/")
 def root():
@@ -144,10 +131,6 @@ def health():
     }
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
-
-# ============================================================
-# GEMINI METADATA (100% BULLETPROOF - NEVER FAILS ON 401)
-# ============================================================
 
 def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: int):
     clean_title = re.sub(r"[^\w\s-]", "", video_title or "Social Video")[:40].strip()
@@ -186,7 +169,7 @@ Respond ONLY in strict JSON:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with urllib.request.urlopen(request, timeout=6) as response:
             response_data = json.loads(response.read().decode("utf-8"))
 
         candidates = response_data.get("candidates") or []
@@ -200,13 +183,8 @@ Respond ONLY in strict JSON:
             "hashtags": str(metadata.get("hashtags") or "#Shorts #Viral #Trending")[:500],
         }
     except Exception as exc:
-        # HTTP 401 හෝ Network error ආවොත් server එක crash නොවී fallback එක ලබා දේ
-        logger.warning("Gemini generation skipped safely (%s). Using fallback metadata.", exc)
+        logger.warning("Gemini generation skipped (%s). Using fallback metadata.", exc)
         return fallback_result
-
-# ============================================================
-# AUTH ROUTES
-# ============================================================
 
 @app.post("/auth/register")
 async def register(request: Request):
@@ -285,7 +263,6 @@ async def login(request: Request):
 
     user_email, _, is_vip, vip_expiry, clips_used = user
 
-    # Admin Account gets automatic Lifetime VIP
     is_admin = bool(ADMIN_EMAIL) and normalize_email(user_email) == normalize_email(ADMIN_EMAIL)
     if is_admin:
         is_vip = 1
@@ -410,10 +387,6 @@ async def activate_vip(request: Request):
         "vip_expiry": expiry,
     }
 
-# ============================================================
-# SOCIAL VIDEO DOWNLOADER (NO YOUTUBE)
-# ============================================================
-
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
@@ -498,10 +471,6 @@ def escape_drawtext(text: str) -> str:
         text = text.replace(old, new)
     return text[:35]
 
-# ============================================================
-# PROCESS VIDEO (NO MISSING VALIDATION + NO WATERMARK FOR VIP)
-# ============================================================
-
 @app.post("/process-video")
 async def process_video(request: Request):
     try:
@@ -580,7 +549,6 @@ async def process_video(request: Request):
         clips_used = int(clips_used or 0)
         current_month = datetime.now().strftime("%Y-%m")
 
-        # Admin is always VIP
         if is_admin_email:
             is_vip = 1
             vip_expiry = "2099-12-31"
@@ -604,7 +572,6 @@ async def process_video(request: Request):
             except ValueError:
                 is_vip = 0
 
-        # Free Monthly Limit Check (15 clips)
         if not is_vip and clips_used >= 15:
             raise HTTPException(
                 status_code=403,
@@ -613,7 +580,6 @@ async def process_video(request: Request):
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        # Free Users max 10 mins (600 seconds)
         if not is_vip and total_duration > 600:
             raise HTTPException(
                 status_code=403,
@@ -643,7 +609,6 @@ async def process_video(request: Request):
             meta = generate_metadata_with_gemini(video_title, i + 1, total_parts)
             title_text = escape_drawtext(meta.get("title", ""))
 
-            # Anti-Copyright Base Filter
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
                 "crop=720:1280,boxblur=15:5[bg];"
@@ -656,7 +621,7 @@ async def process_video(request: Request):
                 "boxborderw=10:x=(w-text_w)/2:y=120[vout]"
             )
 
-            # VIP / Admin අයට Watermark එක 100% ක් සම්පූර්ණයෙන්ම Remove වේ
+            # VIP / Admin අයට Watermark එක 100% ක් සම්පූර්ණයෙන්ම ඉවත් වේ
             if not is_vip:
                 vf_filter = (
                     base_filter
@@ -692,7 +657,7 @@ async def process_video(request: Request):
                 "-crf",
                 "22",
                 "-preset",
-                "veryfast",
+                "ultrafast",  # ක්ෂණිකව convert වීමට ultrafast සකසා ඇත
                 "-threads",
                 "2",
                 "-c:a",
@@ -767,7 +732,7 @@ async def process_video(request: Request):
         logger.exception("Unexpected process-video error")
         raise HTTPException(
             status_code=500,
-            detail=f"වීඩියෝව සැකසීමේදී දෝෂයක් ඇති විය: {str(exc)[:200]}",
+            detail=f"වීඩියෝව සැකසීමේදී අනපේක්ෂිත දෝෂයක් ඇති විය: {str(exc)[:200]}",
         ) from exc
     finally:
         safe_remove(raw_video)
