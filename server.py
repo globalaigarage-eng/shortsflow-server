@@ -49,7 +49,7 @@ else:
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().casefold()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6Ifb7gzsRjY756lFhk-y8yvH0q6BWmDqv40PuFNeP7I6g")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # In-memory OTP storage is for demo use only. It resets when the server restarts.
 otp_storage: dict[str, dict[str, Any]] = {}
