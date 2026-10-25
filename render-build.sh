@@ -8,8 +8,8 @@ import random
 import urllib.request
 import math
 from datetime import datetime, timedelta
-from typing import Optional
-from fastapi import FastAPI, HTTPException
+from typing import Optional, Any
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
@@ -104,7 +104,7 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Highlight moment from {clean_title}! Follow and share.",
+            "description": f"Highlight clip from {clean_title}! Share, like and follow.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
@@ -115,7 +115,7 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
     Respond ONLY in strict JSON:
     {{
         "title": "Dramatic Title{suffix}",
-        "description": "Engaging 2-sentence description summarizing this part",
+        "description": "Engaging 2-sentence description",
         "hashtags": "#Viral #Trending #FYP #Reels #Shorts"
     }}
     """
@@ -153,10 +153,12 @@ class ActivateVipReq(BaseModel):
     admin_email: str
     target_user_email: str
 
+# කිසිදු field එකක් missing නොවන flexible schema එකක්
 class ProcessVideoReq(BaseModel):
     email: str
     video_url: Optional[str] = None
     youtube_url: Optional[str] = None
+    clip_count: Optional[int] = 1
 
 @app.post("/auth/register")
 def register(req: AuthReq):
@@ -285,7 +287,7 @@ def download_social_video(url: str, output_path: str):
             info = ydl.extract_info(clean_url, download=True)
             if not info:
                 raise RuntimeError("No video information extracted")
-            title = info.get("title") or "Viral Social Video"
+            title = info.get("title") or "Viral Video"
             duration = int(info.get("duration") or 60)
             return title, duration
     except Exception as exc:
@@ -333,9 +335,10 @@ def process_video(req: ProcessVideoReq):
         conn.close()
         raise HTTPException(
             status_code=403, 
-            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට සාදා ඇත: {clips_used}). Unlimited වීඩියෝ සඳහා PRO VIP ලබාගන්න."
+            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට: {clips_used}). PRO VIP ලබාගන්න."
         )
 
+    # youtube_url හෝ video_url දෙකෙන්ම එකක් ලබා ගැනීම
     url_to_process = (req.video_url or req.youtube_url or "").strip()
     if not url_to_process:
         conn.close()
