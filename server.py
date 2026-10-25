@@ -17,8 +17,8 @@ OUTPUT_DIR = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
-ADMIN_EMAIL = "anushkamalshan666@gmail.com"
-ADMIN_PASSWORD = "@Anushka*malshan2005"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 otp_storage = {}
@@ -47,12 +47,20 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
-    cursor.execute("SELECT email FROM users WHERE email = ?", (ADMIN_EMAIL,))
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO users VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')", 
-                       (ADMIN_EMAIL, ADMIN_PASSWORD, datetime.now().strftime("%Y-%m")))
-    else:
-        cursor.execute("UPDATE users SET password = ? WHERE email = ?", (ADMIN_PASSWORD, ADMIN_EMAIL))
+    # Admin credentials must be configured as Render environment variables.
+    # Do not create an admin account with an empty/default password.
+    if ADMIN_EMAIL and ADMIN_PASSWORD:
+        cursor.execute("SELECT email FROM users WHERE email = ?", (ADMIN_EMAIL,))
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO users VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')",
+                (ADMIN_EMAIL, ADMIN_PASSWORD, datetime.now().strftime("%Y-%m"))
+            )
+        else:
+            cursor.execute(
+                "UPDATE users SET password = ? WHERE email = ?",
+                (ADMIN_PASSWORD, ADMIN_EMAIL)
+            )
     
     conn.commit()
     conn.close()
@@ -202,7 +210,7 @@ def reset_password(req: ResetReq):
 
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
-    if req.admin_email.lower().strip() != ADMIN_EMAIL.lower():
+    if not ADMIN_EMAIL or not ADMIN_PASSWORD or req.admin_email.lower().strip() != ADMIN_EMAIL:
         raise HTTPException(status_code=403, detail="අවසර නැත.")
     
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
@@ -214,6 +222,7 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
+# --- Video ID Extractor ---
 def extract_youtube_id(url: str):
     patterns = [
         r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})'
@@ -224,87 +233,72 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- YouTube Direct Stream Extractor (Zero Bot Blocks) ---
+# --- YouTube & Video Downloader Engine ---
 def download_media_stream(url: str, output_path: str):
-    clean_url = url.split("?si=")[0].split("&si=")[0].strip()
+    """
+    Download media with yt-dlp.
+    Optional YouTube cookies:
+      - Set YOUTUBE_COOKIES_FILE in Render Environment to the absolute path
+        of a cookies.txt file that exists on the deployed service, OR
+      - Place cookies.txt beside server.py (not recommended for public repos).
+    """
+    clean_url = url.strip()
     video_id = extract_youtube_id(clean_url)
-    
-    # 1. YouTube නම්: yt-dlp මඟින් YouTube වෙත කෙලින්ම request යැවීම සම්පූර්ණයෙන්ම වළක්වා proxy streams භාවිත කිරීම
-    if video_id:
-        target_video = f"https://www.youtube.com/watch?v={video_id}"
 
-        # Cobalt APIs
-        cobalt_nodes = [
-            "https://api.cobalt.tools",
-            "https://cobalt-api.kwiatekm.tokyo",
-            "https://co.wuk.sh"
-        ]
-        for c_api in cobalt_nodes:
-            try:
-                post_body = json.dumps({"url": target_video, "videoQuality": "720"}).encode('utf-8')
-                req = urllib.request.Request(
-                    f"{c_api}/",
-                    data=post_body,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0"
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=9) as res:
-                    body = json.loads(res.read().decode('utf-8'))
-                    s_url = body.get("url")
-                    if s_url:
-                        cmd = ["ffmpeg", "-y", "-i", s_url, "-c", "copy", "-t", "360", output_path]
-                        subprocess.run(cmd, check=True, timeout=90)
-                        return "Viral YouTube Video", 180
-            except Exception:
-                continue
+    # yt-dlp needs a real, readable Netscape-format cookies file to use cookies.
+    cookie_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
+    if not cookie_path:
+        local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+        if os.path.isfile(local_cookie_path):
+            cookie_path = local_cookie_path
 
-        # Invidious Instances
-        invidious_nodes = [
-            "https://invidious.nerdvpn.de",
-            "https://inv.tux.pizza",
-            "https://invidious.private.coffee",
-            "https://yewtu.be"
-        ]
-        for node in invidious_nodes:
-            try:
-                req = urllib.request.Request(
-                    f"{node}/api/v1/videos/{video_id}",
-                    headers={"User-Agent": "Mozilla/5.0"}
-                )
-                with urllib.request.urlopen(req, timeout=7) as res:
-                    data = json.loads(res.read().decode('utf-8'))
-                    title = data.get("title", "Viral Clip")
-                    duration = int(data.get("lengthSeconds") or 180)
-                    for fmt in data.get("formatStreams", []):
-                        if fmt.get("container") == "mp4":
-                            stream_link = fmt.get("url")
-                            if stream_link:
-                                cmd = ["ffmpeg", "-y", "-i", stream_link, "-c", "copy", "-t", "360", output_path]
-                                subprocess.run(cmd, check=True, timeout=90)
-                                return title, duration
-            except Exception:
-                continue
-
-        # yt-dlp කිසිසේත්ම call නොකර අසමත් වූ බව පෙන්වීම (yt-dlp call කළහොත් IP block එකට හසුවේ)
-        raise Exception("YouTube වෙතින් වීඩියෝව බාගත කිරීමට නොහැකි විය. කරුණාකර වෙනත් YouTube Link එකක් ලබා දෙන්න.")
-
-    # TikTok, Facebook, Reels සඳහා පමණක් yt-dlp
     ydl_opts = {
-        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
-        'outtmpl': output_path,
-        'overwrites': True,
-        'quiet': True,
-        'no_warnings': True,
-        'nocheckcertificate': True
+        "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
+        "outtmpl": output_path,
+        "overwrites": True,
+        "quiet": False,
+        "no_warnings": False,
+        "socket_timeout": 30,
+        "retries": 2,
+        "fragment_retries": 2,
+        "noplaylist": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(clean_url, download=True)
-        title = info.get('title', 'Viral Clip')
-        duration = int(info.get('duration') or 180)
-        return title, duration
+
+    if cookie_path:
+        if not os.path.isfile(cookie_path):
+            raise RuntimeError(
+                "YOUTUBE_COOKIES_FILE is set, but the file does not exist on the server."
+            )
+        if not os.access(cookie_path, os.R_OK):
+            raise RuntimeError(
+                "The YouTube cookies file exists but is not readable by the server."
+            )
+        ydl_opts["cookiefile"] = cookie_path
+
+    target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target_url, download=True)
+            title = info.get("title", "Viral Clip")
+            duration = int(info.get("duration") or 180)
+            return title, duration
+    except Exception as exc:
+        message = str(exc)
+        if "Sign in to confirm you're not a bot" in message or "confirm you're not a bot" in message:
+            if not cookie_path:
+                raise RuntimeError(
+                    "YouTube requires authentication for this request. The server did not load "
+                    "a cookies file. Set YOUTUBE_COOKIES_FILE to a valid server-side "
+                    "Netscape-format cookies.txt path, then redeploy."
+                ) from exc
+            raise RuntimeError(
+                "YouTube still rejected the request even with the configured cookies. "
+                "The cookies may be expired/invalid, or the hosting IP may be blocked. "
+                "Export a fresh cookies file from your own signed-in browser session and "
+                "store it privately; do not commit it to a public repository."
+            ) from exc
+        raise RuntimeError(f"yt-dlp download failed: {message}") from exc
 
 @app.post("/process-video")
 def process_video(req: ProcessVideoReq):
