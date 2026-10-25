@@ -6,7 +6,6 @@ import shutil
 import json
 import random
 import urllib.request
-import urllib.error
 import math
 import logging
 from datetime import datetime, timedelta
@@ -217,7 +216,7 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "bestvideo+bestaudio/best",
+        "format": "bestvideo[height<=720]+bestaudio/best/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
@@ -269,6 +268,13 @@ async def process_video(request: Request):
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
+        # Free user සඳහා උපරිම විනාඩි 10 (තත්පර 600) සීමාව
+        if not is_vip and total_duration > 600:
+            raise HTTPException(
+                status_code=403,
+                detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
+            )
+
         part_duration = 180
         total_parts = max(1, math.ceil(total_duration / part_duration))
 
@@ -285,8 +291,8 @@ async def process_video(request: Request):
             title_text = escape_drawtext(meta.get("title", ""))
 
             base_filter = (
-                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
-                "[0:v]scale=720:-1,setsar=1,eq=brightness=0.03:saturation=1.12:contrast=1.05,setpts=0.97*PTS[fg];"
+                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280[bg];"
+                "[0:v]scale=720:-1,setsar=1,setpts=0.97*PTS[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2[combined];"
                 f"[combined]drawtext=text='{title_text}':fontcolor=yellow:fontsize=36:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=120[vout]"
             )
@@ -301,12 +307,13 @@ async def process_video(request: Request):
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
                 "-filter_complex", vf_filter, "-map", video_map, "-map", "0:a?",
-                "-af", "atempo=1.03,volume=1.05", "-c:v", "libx264", "-crf", "23",
-                "-preset", "ultrafast", "-threads", "2", "-c:a", "aac", "-b:a", "128k",
+                "-af", "atempo=1.03", "-c:v", "libx264", "-crf", "28",
+                "-preset", "ultrafast", "-threads", "4", "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart", "-map_metadata", "-1", final_path,
             ]
 
-            subprocess.run(command, check=True, timeout=180, capture_output=True, text=True)
+            # Timeout සීමාව තත්පර 300 (විනාඩි 5) දක්වා වැඩි කර ඇත
+            subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
