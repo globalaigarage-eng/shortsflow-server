@@ -21,27 +21,12 @@ PUBLIC_BASE_URL = os.environ.get(
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Keep SQLite in a stable location beside server.py. This avoids a different
-# working directory accidentally creating a second, empty database.
-DB_PATH = os.environ.get(
-    "SHORTSFLOW_DB_PATH", os.path.join(PROJECT_DIR, "shortsflow.db")
-).strip()
-if not os.path.isabs(DB_PATH):
-    DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
-
-# One-time compatibility: if an older deployment created the DB in its
-# working directory, copy it to the stable path rather than silently losing users.
-_LEGACY_DB_PATH = os.path.abspath("shortsflow.db")
-if (
-    not os.path.exists(DB_PATH)
-    and os.path.isfile(_LEGACY_DB_PATH)
-    and os.path.abspath(_LEGACY_DB_PATH) != os.path.abspath(DB_PATH)
-):
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    shutil.copy2(_LEGACY_DB_PATH, DB_PATH)
-
+# IMPORTANT: use the same SQLite path that the original server used.
+# All auth, VIP activation, and video-processing endpoints must share this DB.
+# Do not switch to a second DB_PATH, otherwise login and /process-video can
+# see different user tables and /process-video returns "user record not found".
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect("shortsflow.db", timeout=30)
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
@@ -129,7 +114,7 @@ init_db()
 # --- Gemini Smart Title & Hooks ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
-    fallback_title = f"🔥 {clean_title} (Must Watch)"
+    fallback_title = f"ðŸ”¥ {clean_title} (Must Watch)"
 
     if not GEMINI_API_KEY:
         return {
@@ -199,15 +184,15 @@ def register(req: AuthReq):
         cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
         if cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=403, detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!")
+            raise HTTPException(status_code=403, detail="à¶¸à·™à¶¸ à¶¯à·”à¶»à¶šà¶®à¶±à¶ºà·™à¶±à·Š à¶¯à·à¶±à¶§à¶¸à¶­à·Š Free à¶œà·’à¶«à·”à¶¸à¶šà·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­!")
 
     try:
         cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?, ?)", 
                        (user_email, req.password, current_month, req.device_id))
         conn.commit()
-        return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
+        return {"status": "success", "message": "à¶œà·’à¶«à·”à¶¸ à·ƒà·à¶¯à¶± à¶½à¶¯à·“!"}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
+        raise HTTPException(status_code=400, detail="à¶¸à·™à¶¸ Email à¶‘à¶š à¶¯à·à¶±à¶§à¶¸à¶­à·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­.")
     finally:
         conn.close()
 
@@ -221,7 +206,7 @@ def login(req: AuthReq):
     conn.close()
     
     if not user:
-        raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
+        raise HTTPException(status_code=401, detail="Email à·„à· Password à·€à·à¶»à¶¯à·’à¶ºà·’.")
     
     email, is_vip, vip_expiry, clips_used = user
     if is_vip and vip_expiry and datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
@@ -244,11 +229,11 @@ def forgot_password(req: ForgotReq):
     conn.close()
 
     if not user:
-        raise HTTPException(status_code=404, detail="Email ලිපිනය හමු නොවීය.")
+        raise HTTPException(status_code=404, detail="Email à¶½à·’à¶´à·’à¶±à¶º à·„à¶¸à·” à¶±à·œà·€à·“à¶º.")
 
     otp = str(random.randint(100000, 999999))
     otp_storage[normalize_email(req.email)] = otp
-    return {"status": "success", "message": "OTP කේතය Email වෙත යවන ලදී (Demo: " + otp + ")"}
+    return {"status": "success", "message": "OTP à¶šà·šà¶­à¶º Email à·€à·™à¶­ à¶ºà·€à¶± à¶½à¶¯à·“ (Demo: " + otp + ")"}
 
 @app.post("/auth/reset-password")
 def reset_password(req: ResetReq):
@@ -256,7 +241,7 @@ def reset_password(req: ResetReq):
     stored_otp = otp_storage.get(target_email)
 
     if not stored_otp or stored_otp != req.otp.strip():
-        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි.")
+        raise HTTPException(status_code=400, detail="OTP à¶…à¶‚à¶šà¶º à·€à·à¶»à¶¯à·’à¶ºà·’.")
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -265,12 +250,12 @@ def reset_password(req: ResetReq):
     conn.close()
 
     del otp_storage[target_email]
-    return {"status": "success", "message": "Password යාවත්කාලීන විය!"}
+    return {"status": "success", "message": "Password à¶ºà·à·€à¶­à·Šà¶šà·à¶½à·“à¶± à·€à·’à¶º!"}
 
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
     if not ADMIN_EMAIL or not ADMIN_PASSWORD or normalize_email(req.admin_email) != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="අවසර නැත.")
+        raise HTTPException(status_code=403, detail="à¶…à·€à·ƒà¶» à¶±à·à¶­.")
     
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = get_db_connection()
@@ -279,7 +264,7 @@ def activate_vip(req: ActivateVipReq):
                    (expiry, normalize_email(req.target_user_email)))
     conn.commit()
     conn.close()
-    return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
+    return {"status": "success", "message": f"{req.target_user_email} VIP à·ƒà¶šà·Šâ€à¶»à·“à¶º à·€à·’à¶º!"}
 
 # --- Video ID Extractor ---
 def extract_youtube_id(url: str):
@@ -380,18 +365,18 @@ def process_video(req: ProcessVideoReq):
     
     if not user:
         conn.close()
-        raise HTTPException(status_code=404, detail="මෙම email එකට user record එක database එකේ නැත. Login සහ video request එක එකම email/database එක භාවිත කරනවාද බලන්න.")
+        raise HTTPException(status_code=404, detail="à¶¸à·™à¶¸ email à¶‘à¶šà¶§ user record à¶‘à¶š database à¶‘à¶šà·š à¶±à·à¶­. Login à·ƒà·„ video request à¶‘à¶š à¶‘à¶šà¶¸ email/database à¶‘à¶š à¶·à·à·€à·’à¶­ à¶šà¶»à¶±à·€à·à¶¯ à¶¶à¶½à¶±à·Šà¶±.")
     
     is_vip, clips_used = user[0], user[1] or 0
 
     max_per_link = 10 if is_vip else 2
     if req.clip_count < 1 or req.clip_count > max_per_link:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"වීඩියෝ 1 සිට {max_per_link} දක්වා තෝරන්න.")
+        raise HTTPException(status_code=403, detail=f"à·€à·“à¶©à·’à¶ºà· 1 à·ƒà·’à¶§ {max_per_link} à¶¯à¶šà·Šà·€à· à¶­à·à¶»à¶±à·Šà¶±.")
 
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
+        raise HTTPException(status_code=403, detail=f"Free à¶¸à·à·ƒà·’à¶š à·ƒà·“à¶¸à·à·€ (à·€à·“à¶©à·’à¶ºà· 30) à¶…à·€à·ƒà¶±à·Š! (à¶¯à·à¶±à¶§: {clips_used}). VIP à¶½à¶¶à·à¶œà¶±à·Šà¶±.")
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
@@ -433,7 +418,7 @@ def process_video(req: ProcessVideoReq):
             )
 
             if not is_vip:
-                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
+                vf_filter = base_filter + ",drawtext=text='âœ¨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = base_filter
 
