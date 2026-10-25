@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import shutil
 import json
 import random
 import urllib.request
@@ -19,6 +20,34 @@ PUBLIC_BASE_URL = os.environ.get(
 ).strip().rstrip("/")
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Keep SQLite in a stable location beside server.py. This avoids a different
+# working directory accidentally creating a second, empty database.
+DB_PATH = os.environ.get(
+    "SHORTSFLOW_DB_PATH", os.path.join(PROJECT_DIR, "shortsflow.db")
+).strip()
+if not os.path.isabs(DB_PATH):
+    DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
+
+# One-time compatibility: if an older deployment created the DB in its
+# working directory, copy it to the stable path rather than silently losing users.
+_LEGACY_DB_PATH = os.path.abspath("shortsflow.db")
+if (
+    not os.path.exists(DB_PATH)
+    and os.path.isfile(_LEGACY_DB_PATH)
+    and os.path.abspath(_LEGACY_DB_PATH) != os.path.abspath(DB_PATH)
+):
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    shutil.copy2(_LEGACY_DB_PATH, DB_PATH)
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().casefold()
+
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -55,7 +84,7 @@ otp_storage = {}
 
 # --- Database Setup ---
 def init_db():
-    conn = sqlite3.connect("shortsflow.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -100,7 +129,7 @@ init_db()
 # --- Gemini Smart Title & Hooks ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
-    fallback_title = f"ðŸ”¥ {clean_title} (Must Watch)"
+    fallback_title = f"🔥 {clean_title} (Must Watch)"
 
     if not GEMINI_API_KEY:
         return {
@@ -161,38 +190,38 @@ class ProcessVideoReq(BaseModel):
 
 @app.post("/auth/register")
 def register(req: AuthReq):
-    conn = sqlite3.connect("shortsflow.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     current_month = datetime.now().strftime("%Y-%m")
-    user_email = req.email.lower().strip()
+    user_email = normalize_email(req.email)
     
     if user_email != ADMIN_EMAIL.lower() and req.device_id and req.device_id != "UNKNOWN":
         cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
         if cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=403, detail="à¶¸à·™à¶¸ à¶¯à·”à¶»à¶šà¶®à¶±à¶ºà·™à¶±à·Š à¶¯à·à¶±à¶§à¶¸à¶­à·Š Free à¶œà·’à¶«à·”à¶¸à¶šà·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­!")
+            raise HTTPException(status_code=403, detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!")
 
     try:
         cursor.execute("INSERT INTO users VALUES (?, ?, 0, NULL, 0, ?, ?)", 
                        (user_email, req.password, current_month, req.device_id))
         conn.commit()
-        return {"status": "success", "message": "à¶œà·’à¶«à·”à¶¸ à·ƒà·à¶¯à¶± à¶½à¶¯à·“!"}
+        return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="à¶¸à·™à¶¸ Email à¶‘à¶š à¶¯à·à¶±à¶§à¶¸à¶­à·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­.")
+        raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
     finally:
         conn.close()
 
 @app.post("/auth/login")
 def login(req: AuthReq):
-    conn = sqlite3.connect("shortsflow.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT email, is_vip, vip_expiry, monthly_clips_used FROM users WHERE email = ? AND password = ?", 
-                   (req.email.lower().strip(), req.password))
+    cursor.execute("SELECT email, is_vip, vip_expiry, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ? AND password = ?", 
+                   (normalize_email(req.email), req.password))
     user = cursor.fetchone()
     conn.close()
     
     if not user:
-        raise HTTPException(status_code=401, detail="Email à·„à· Password à·€à·à¶»à¶¯à·’à¶ºà·’.")
+        raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
     
     email, is_vip, vip_expiry, clips_used = user
     if is_vip and vip_expiry and datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
@@ -208,49 +237,49 @@ def login(req: AuthReq):
 
 @app.post("/auth/forgot-password")
 def forgot_password(req: ForgotReq):
-    conn = sqlite3.connect("shortsflow.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT email FROM users WHERE email = ?", (req.email.lower().strip(),))
+    cursor.execute("SELECT email FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
     user = cursor.fetchone()
     conn.close()
 
     if not user:
-        raise HTTPException(status_code=404, detail="Email à¶½à·’à¶´à·’à¶±à¶º à·„à¶¸à·” à¶±à·œà·€à·“à¶º.")
+        raise HTTPException(status_code=404, detail="Email ලිපිනය හමු නොවීය.")
 
     otp = str(random.randint(100000, 999999))
-    otp_storage[req.email.lower().strip()] = otp
-    return {"status": "success", "message": "OTP à¶šà·šà¶­à¶º Email à·€à·™à¶­ à¶ºà·€à¶± à¶½à¶¯à·“ (Demo: " + otp + ")"}
+    otp_storage[normalize_email(req.email)] = otp
+    return {"status": "success", "message": "OTP කේතය Email වෙත යවන ලදී (Demo: " + otp + ")"}
 
 @app.post("/auth/reset-password")
 def reset_password(req: ResetReq):
-    target_email = req.email.lower().strip()
+    target_email = normalize_email(req.email)
     stored_otp = otp_storage.get(target_email)
 
     if not stored_otp or stored_otp != req.otp.strip():
-        raise HTTPException(status_code=400, detail="OTP à¶…à¶‚à¶šà¶º à·€à·à¶»à¶¯à·’à¶ºà·’.")
+        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි.")
 
-    conn = sqlite3.connect("shortsflow.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET password = ? WHERE email = ?", (req.new_password, target_email))
     conn.commit()
     conn.close()
 
     del otp_storage[target_email]
-    return {"status": "success", "message": "Password à¶ºà·à·€à¶­à·Šà¶šà·à¶½à·“à¶± à·€à·’à¶º!"}
+    return {"status": "success", "message": "Password යාවත්කාලීන විය!"}
 
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
-    if not ADMIN_EMAIL or not ADMIN_PASSWORD or req.admin_email.lower().strip() != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="à¶…à·€à·ƒà¶» à¶±à·à¶­.")
+    if not ADMIN_EMAIL or not ADMIN_PASSWORD or normalize_email(req.admin_email) != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="අවසර නැත.")
     
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("shortsflow.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET is_vip = 1, vip_expiry = ? WHERE email = ?", 
-                   (expiry, req.target_user_email.lower().strip()))
+                   (expiry, normalize_email(req.target_user_email)))
     conn.commit()
     conn.close()
-    return {"status": "success", "message": f"{req.target_user_email} VIP à·ƒà¶šà·Šâ€à¶»à·“à¶º à·€à·’à¶º!"}
+    return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
 # --- Video ID Extractor ---
 def extract_youtube_id(url: str):
@@ -344,25 +373,25 @@ def download_media_stream(url: str, output_path: str):
 
 @app.post("/process-video")
 def process_video(req: ProcessVideoReq):
-    conn = sqlite3.connect("shortsflow.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT is_vip, monthly_clips_used FROM users WHERE email = ?", (req.email.lower().strip(),))
+    cursor.execute("SELECT is_vip, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?", (normalize_email(req.email),))
     user = cursor.fetchone()
     
     if not user:
         conn.close()
-        raise HTTPException(status_code=404, detail="User à·„à¶¸à·” à¶±à·œà·€à·“à¶º.")
+        raise HTTPException(status_code=404, detail="මෙම email එකට user record එක database එකේ නැත. Login සහ video request එක එකම email/database එක භාවිත කරනවාද බලන්න.")
     
     is_vip, clips_used = user[0], user[1] or 0
 
     max_per_link = 10 if is_vip else 2
     if req.clip_count < 1 or req.clip_count > max_per_link:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"à·€à·“à¶©à·’à¶ºà· 1 à·ƒà·’à¶§ {max_per_link} à¶¯à¶šà·Šà·€à· à¶­à·à¶»à¶±à·Šà¶±.")
+        raise HTTPException(status_code=403, detail=f"වීඩියෝ 1 සිට {max_per_link} දක්වා තෝරන්න.")
 
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free à¶¸à·à·ƒà·’à¶š à·ƒà·“à¶¸à·à·€ (à·€à·“à¶©à·’à¶ºà· 30) à¶…à·€à·ƒà¶±à·Š! (à¶¯à·à¶±à¶§: {clips_used}). VIP à¶½à¶¶à·à¶œà¶±à·Šà¶±.")
+        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
@@ -404,7 +433,7 @@ def process_video(req: ProcessVideoReq):
             )
 
             if not is_vip:
-                vf_filter = base_filter + ",drawtext=text='âœ¨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
+                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = base_filter
 
@@ -426,7 +455,7 @@ def process_video(req: ProcessVideoReq):
             })
 
         if not is_vip:
-            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE email = ?", (req.clip_count, req.email.lower().strip()))
+            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE email = ?", (req.clip_count, normalize_email(req.email)))
             conn.commit()
 
         conn.close()
