@@ -5,7 +5,6 @@ import subprocess
 import json
 import random
 import urllib.request
-import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -225,96 +224,64 @@ def extract_youtube_id(url: str):
             return match.group(1)
     return None
 
-# --- Zero-Block Downloader Engine ---
+# --- Downloader Engine ---
 def download_media_stream(url: str, output_path: str):
     clean_url = url.split("?si=")[0].split("&si=")[0].strip()
     video_id = extract_youtube_id(clean_url)
-    is_youtube = bool(video_id or "youtube.com" in url or "youtu.be" in url)
-
-    if is_youtube and video_id:
-        target_video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-        # 1. Cobalt API Endpoints පරීක්ෂාව
-        cobalt_endpoints = [
-            "https://api.cobalt.tools",
-            "https://cobalt-api.kwiatekm.tokyo",
-            "https://cobalt.api.hyper.lol"
-        ]
-        for c_api in cobalt_endpoints:
-            try:
-                payload = json.dumps({"url": target_video_url, "videoQuality": "720"}).encode('utf-8')
-                req = urllib.request.Request(
-                    f"{c_api}/",
-                    data=payload,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=8) as res:
-                    body = json.loads(res.read().decode('utf-8'))
-                    s_url = body.get("url")
-                    if s_url:
-                        cmd = ["ffmpeg", "-y", "-i", s_url, "-c", "copy", "-t", "360", output_path]
-                        subprocess.run(cmd, check=True, timeout=90)
-                        return "Viral YouTube Video", 180
-            except Exception:
-                continue
-
-        # 2. Invidious Open Public Instances
-        invidious_endpoints = [
-            "https://invidious.nerdvpn.de",
-            "https://inv.tux.pizza",
-            "https://invidious.private.coffee",
-            "https://yewtu.be"
-        ]
-        for inv in invidious_endpoints:
-            try:
-                inv_url = f"{inv}/api/v1/videos/{video_id}"
-                req = urllib.request.Request(
-                    inv_url,
-                    headers={"User-Agent": "Mozilla/5.0"}
-                )
-                with urllib.request.urlopen(req, timeout=6) as res:
-                    data = json.loads(res.read().decode('utf-8'))
-                    title = data.get("title", "Viral Clip")
-                    duration = int(data.get("lengthSeconds") or 180)
-                    for fmt in data.get("formatStreams", []):
-                        if fmt.get("container") == "mp4":
-                            direct_link = fmt.get("url")
-                            if direct_link:
-                                cmd = ["ffmpeg", "-y", "-i", direct_link, "-c", "copy", "-t", "360", output_path]
-                                subprocess.run(cmd, check=True, timeout=90)
-                                return title, duration
-            except Exception:
-                continue
-
-        # 3. Y2Mate / 10Downloader Direct Stream Resolver Fallback
+    
+    # 1. YouTube නම්: Bot detection එකෙන් block නොවන Android VR / TV clients යොදා ගැනීම
+    if video_id:
+        target_url = f"https://www.youtube.com/watch?v={video_id}"
+        ydl_opts = {
+            'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
+            'outtmpl': output_path,
+            'overwrites': True,
+            'quiet': False,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'socket_timeout': 30,
+            # Bot block නොවන Android VR සහ TV clients
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android_vr', 'tv'],
+                    'player_skip': ['webpage', 'configs']
+                }
+            },
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (PlayStation 4 5.05) AppleWebKit/601.2 (KHTML, like Gecko)'
+            }
+        }
+        
         try:
-            # yt-dlp android client සමඟ (cookies නැතිව)
-            ydl_opts_yt = {
-                'format': 'best[height<=720][ext=mp4]/best[ext=mp4]/best',
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(target_url, download=True)
+                title = info.get('title', 'Viral Clip')
+                duration = int(info.get('duration') or 180)
+                return title, duration
+        except Exception as e:
+            print(f"[DEBUG] Primary client failed: {e}, falling back to Web Embedded...")
+
+            # 2. Fallback: Web Embedded client
+            fallback_opts = {
+                'format': 'best[ext=mp4]/best',
                 'outtmpl': output_path,
                 'overwrites': True,
                 'quiet': True,
-                'no_warnings': True,
+                'nocheckcertificate': True,
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android_creator', 'ios']
+                        'player_client': ['web_embedded']
                     }
                 }
             }
-            with yt_dlp.YoutubeDL(ydl_opts_yt) as ydl:
-                info = ydl.extract_info(target_video_url, download=True)
-                return info.get('title', 'Viral Clip'), int(info.get('duration') or 180)
-        except Exception:
-            pass
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                info = ydl.extract_info(target_url, download=True)
+                title = info.get('title', 'Viral Clip')
+                duration = int(info.get('duration') or 180)
+                return title, duration
 
-        raise Exception("YouTube වෙතින් වීඩියෝව ලබාගත නොහැකි විය. කරුණාකර වෙනත් YouTube Link එකක් උත්සාහ කරන්න.")
-
-    # Facebook, TikTok, Instagram සඳහා
-    ydl_opts = {
+    # FB, TikTok, Reels සඳහා
+    generic_opts = {
         'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
         'outtmpl': output_path,
         'overwrites': True,
@@ -322,8 +289,7 @@ def download_media_stream(url: str, output_path: str):
         'no_warnings': True,
         'nocheckcertificate': True
     }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(generic_opts) as ydl:
         info = ydl.extract_info(clean_url, download=True)
         title = info.get('title', 'Viral Clip')
         duration = int(info.get('duration') or 180)
