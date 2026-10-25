@@ -132,7 +132,7 @@ init_db()
 # --- Gemini Smart Title & Hooks ---
 def generate_metadata_with_gemini(video_title: str, clip_index: int):
     clean_title = re.sub(r'[^\w\s-]', '', video_title)[:40].strip()
-    fallback_title = f"ðŸ”¥ {clean_title} (Must Watch)"
+    fallback_title = f"🔥 {clean_title} (Must Watch)"
 
     if not GEMINI_API_KEY:
         return {
@@ -202,7 +202,7 @@ def register(req: AuthReq):
         cursor.execute("SELECT email FROM users WHERE device_id = ?", (req.device_id,))
         if cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=403, detail="à¶¸à·™à¶¸ à¶¯à·”à¶»à¶šà¶®à¶±à¶ºà·™à¶±à·Š à¶¯à·à¶±à¶§à¶¸à¶­à·Š Free à¶œà·’à¶«à·”à¶¸à¶šà·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­!")
+            raise HTTPException(status_code=403, detail="මෙම දුරකථනයෙන් දැනටමත් Free ගිණුමක් ලියාපදිංචි කර ඇත!")
 
     try:
         cursor.execute(
@@ -211,9 +211,9 @@ def register(req: AuthReq):
             (user_email, req.password, current_month, req.device_id)
         )
         conn.commit()
-        return {"status": "success", "message": "à¶œà·’à¶«à·”à¶¸ à·ƒà·à¶¯à¶± à¶½à¶¯à·“!"}
+        return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="à¶¸à·™à¶¸ Email à¶‘à¶š à¶¯à·à¶±à¶§à¶¸à¶­à·Š à¶½à·’à¶ºà·à¶´à¶¯à·’à¶‚à¶ à·’ à¶šà¶» à¶‡à¶­.")
+        raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
     finally:
         conn.close()
 
@@ -227,7 +227,7 @@ def login(req: AuthReq):
     conn.close()
     
     if not user:
-        raise HTTPException(status_code=401, detail="Email à·„à· Password à·€à·à¶»à¶¯à·’à¶ºà·’.")
+        raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
     
     email, is_vip, vip_expiry, clips_used = user
     if is_vip and vip_expiry and datetime.now() > datetime.strptime(vip_expiry, "%Y-%m-%d"):
@@ -250,11 +250,11 @@ def forgot_password(req: ForgotReq):
     conn.close()
 
     if not user:
-        raise HTTPException(status_code=404, detail="Email à¶½à·’à¶´à·’à¶±à¶º à·„à¶¸à·” à¶±à·œà·€à·“à¶º.")
+        raise HTTPException(status_code=404, detail="Email ලිපිනය හමු නොවීය.")
 
     otp = str(random.randint(100000, 999999))
     otp_storage[normalize_email(req.email)] = otp
-    return {"status": "success", "message": "OTP à¶šà·šà¶­à¶º Email à·€à·™à¶­ à¶ºà·€à¶± à¶½à¶¯à·“ (Demo: " + otp + ")"}
+    return {"status": "success", "message": "OTP කේතය Email වෙත යවන ලදී (Demo: " + otp + ")"}
 
 @app.post("/auth/reset-password")
 def reset_password(req: ResetReq):
@@ -262,7 +262,7 @@ def reset_password(req: ResetReq):
     stored_otp = otp_storage.get(target_email)
 
     if not stored_otp or stored_otp != req.otp.strip():
-        raise HTTPException(status_code=400, detail="OTP à¶…à¶‚à¶šà¶º à·€à·à¶»à¶¯à·’à¶ºà·’.")
+        raise HTTPException(status_code=400, detail="OTP අංකය වැරදියි.")
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -271,12 +271,12 @@ def reset_password(req: ResetReq):
     conn.close()
 
     del otp_storage[target_email]
-    return {"status": "success", "message": "Password à¶ºà·à·€à¶­à·Šà¶šà·à¶½à·“à¶± à·€à·’à¶º!"}
+    return {"status": "success", "message": "Password යාවත්කාලීන විය!"}
 
 @app.post("/admin/activate-vip")
 def activate_vip(req: ActivateVipReq):
     if not ADMIN_EMAIL or not ADMIN_PASSWORD or normalize_email(req.admin_email) != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="à¶…à·€à·ƒà¶» à¶±à·à¶­.")
+        raise HTTPException(status_code=403, detail="අවසර නැත.")
     
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = get_db_connection()
@@ -285,7 +285,7 @@ def activate_vip(req: ActivateVipReq):
                    (expiry, normalize_email(req.target_user_email)))
     conn.commit()
     conn.close()
-    return {"status": "success", "message": f"{req.target_user_email} VIP à·ƒà¶šà·Šâ€à¶»à·“à¶º à·€à·’à¶º!"}
+    return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
 # --- Video ID Extractor ---
 def extract_youtube_id(url: str):
@@ -309,18 +309,14 @@ def download_media_stream(url: str, output_path: str):
     """
     clean_url = (url or "").strip()
     if not clean_url:
-        raise HTTPException(status_code=400, detail="à¶šà¶»à·”à¶«à·à¶šà¶» video URL à¶‘à¶šà¶šà·Š à¶‡à¶­à·”à·…à¶­à·Š à¶šà¶»à¶±à·Šà¶±.")
+        raise HTTPException(status_code=400, detail="කරුණාකර video URL එකක් ඇතුළත් කරන්න.")
 
     video_id = extract_youtube_id(clean_url)
     target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else clean_url
 
+    # Only use cookies when the operator explicitly configures a private,
+    # fresh cookies.txt file. Do not auto-load stale cookies from the repository.
     cookie_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
-    if not cookie_path:
-        for cookie_name in ("cookies.txt", "cookies.file"):
-            candidate = os.path.join(PROJECT_DIR, cookie_name)
-            if os.path.isfile(candidate):
-                cookie_path = candidate
-                break
 
     ydl_opts = {
         "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
@@ -329,24 +325,34 @@ def download_media_stream(url: str, output_path: str):
         "quiet": True,
         "no_warnings": False,
         "socket_timeout": 30,
-        # Avoid aggressive retries that can worsen a YouTube 429 response.
-        "retries": 1,
-        "fragment_retries": 1,
-        "extractor_retries": 1,
-        "sleep_interval_requests": 1,
+        # Do not hammer YouTube after a rate limit. A 429 should be allowed
+        # to cool down rather than triggering a retry storm.
+        "retries": 0,
+        "fragment_retries": 0,
+        "extractor_retries": 0,
+        "sleep_interval_requests": 2,
         "noplaylist": True,
     }
+
+    # yt-dlp's current YouTube extractor can use Deno for JavaScript challenge
+    # solving. render-build.sh installs Deno at this stable path. If absent,
+    # yt-dlp still runs but may be unable to extract some YouTube videos.
+    deno_path = os.environ.get(
+        "DENO_BIN", "/opt/render/project/.render/deno/bin/deno"
+    ).strip()
+    if deno_path and os.path.isfile(deno_path) and os.access(deno_path, os.X_OK):
+        ydl_opts["js_runtimes"] = {"deno": {"path": deno_path}}
 
     if cookie_path:
         if not os.path.isfile(cookie_path):
             raise HTTPException(
                 status_code=503,
-                detail="YOUTUBE_COOKIES_FILE path à¶‘à¶š server à¶‘à¶šà·š à·„à¶¸à·” à¶±à·œà·€à·“à¶º. Render Environment path à¶‘à¶š à¶´à¶»à·“à¶šà·Šà·‚à· à¶šà¶»à¶±à·Šà¶±."
+                detail="YOUTUBE_COOKIES_FILE path එක server එකේ හමු නොවීය. Render Environment path එක පරීක්ෂා කරන්න."
             )
         if not os.access(cookie_path, os.R_OK):
             raise HTTPException(
                 status_code=503,
-                detail="YouTube cookies file à¶‘à¶š à¶šà·’à¶ºà·€à·’à¶º à¶±à·œà·„à·à¶š. File permissions à¶´à¶»à·“à¶šà·Šà·‚à· à¶šà¶»à¶±à·Šà¶±."
+                detail="YouTube cookies file එක කියවිය නොහැක. File permissions පරීක්ෂා කරන්න."
             )
         ydl_opts["cookiefile"] = cookie_path
 
@@ -368,9 +374,9 @@ def download_media_stream(url: str, output_path: str):
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    "YouTube à·€à·’à·ƒà·’à¶±à·Š ShortsFlow server à¶‘à¶šà·š requests à¶­à·à·€à¶šà·à¶½à·’à¶šà·€ à·ƒà·“à¶¸à· à¶šà¶» à¶‡à¶­ (HTTP 429). "
-                    "à¶¸à·™à¶º app email à¶‘à¶šà·š à·„à· Public URL à¶‘à¶šà·š à¶¯à·à·‚à¶ºà¶šà·Š à¶±à·œà·€à·š. à¶±à·à·€à¶­ à¶±à·à·€à¶­ à¶‹à¶­à·Šà·ƒà·à·„ à¶±à·œà¶šà¶» à¶§à·’à¶š à·€à·šà¶½à·à·€à¶šà¶§ à¶´à·ƒà·” à¶±à·à·€à¶­ à¶‹à¶­à·Šà·ƒà·à·„ à¶šà¶»à¶±à·Šà¶±. "
-                    "Render hosting IP à¶‘à¶š à¶¯à·’à¶œà¶§à¶¸ rate-limit à·€à·”à·€à·„à·œà¶­à·Š YouTube download à·ƒà¶³à·„à· à·€à·™à¶±à¶­à·Š à¶±à·’à¶½/à¶…à·€à·ƒà¶» à¶½à¶­à·Š source à¶‘à¶šà¶šà·Š à¶…à·€à·à·Šâ€à¶º à·€à·š."
+                    "YouTube විසින් ShortsFlow server එකේ requests තාවකාලිකව සීමා කර ඇත (HTTP 429). "
+                    "මෙය app email එකේ හෝ Public URL එකේ දෝෂයක් නොවේ. නැවත නැවත උත්සාහ නොකර ටික වේලාවකට පසු නැවත උත්සාහ කරන්න. "
+                    "Render hosting IP එක දිගටම rate-limit වුවහොත් YouTube download සඳහා වෙනත් නිල/අවසර ලත් source එකක් අවශ්‍ය වේ."
                 )
             ) from exc
 
@@ -379,28 +385,28 @@ def download_media_stream(url: str, output_path: str):
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        "YouTube bot verification à¶‰à¶½à·Šà¶½à¶ºà·’. Server à¶‘à¶šà·š valid cookies file à¶‘à¶šà¶šà·Š à·ƒà¶šà·ƒà· à¶±à·à¶­. "
-                        "Cookies à¶…à·€à·à·Šâ€à¶º à¶±à¶¸à·Š à¶”à¶¶à¶§ à¶…à¶ºà·’à¶­à·’ signed-in session à¶‘à¶šà·™à¶±à·Š export à¶šà·…, à·€à¶½à¶‚à¶œà·” Netscape cookies file à¶‘à¶šà¶šà·Š "
-                        "private storage à¶‘à¶šà¶š à¶­à¶¶à· YOUTUBE_COOKIES_FILE à·ƒà¶šà·ƒà¶±à·Šà¶±. Cookies public repository à¶‘à¶šà¶šà¶§ à¶¯à·à¶±à·Šà¶± à¶‘à¶´à·."
+                        "YouTube bot verification ඉල්ලයි. Server එකේ valid cookies file එකක් සකසා නැත. "
+                        "Cookies අවශ්‍ය නම් ඔබට අයිති signed-in session එකෙන් export කළ, වලංගු Netscape cookies file එකක් "
+                        "private storage එකක තබා YOUTUBE_COOKIES_FILE සකසන්න. Cookies public repository එකකට දාන්න එපා."
                     )
                 ) from exc
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "YouTube bot verification à¶´à·Šâ€à¶»à¶­à·’à¶šà·Šà·‚à·šà¶´ à¶šà·…à·. Cookies expired/invalid à·€à·’à¶º à·„à·à¶šà·’à¶ºà·’, à¶±à·à¶­à·Šà¶±à¶¸à·Š Render IP à¶‘à¶š à·ƒà·“à¶¸à· à¶šà¶» à¶­à·’à¶¶à·’à¶º à·„à·à¶šà·’à¶ºà·’. "
-                    "Cookies à¶…à¶½à·”à¶­à·Š à¶šà¶»à¶½à·à¶­à·Š à¶¸à·™à¶º à¶´à·€à¶­à·’à¶±à·€à· à¶±à¶¸à·Š hosting IP restriction à¶‘à¶š code à¶‘à¶šà·™à¶±à·Š à¶´à¶¸à¶«à¶šà·Š à·€à·’à·ƒà¶³à·’à¶º à¶±à·œà·„à·à¶š."
+                    "YouTube bot verification ප්‍රතික්ෂේප කළා. Cookies expired/invalid විය හැකියි, නැත්නම් Render IP එක සීමා කර තිබිය හැකියි. "
+                    "Fresh cookies භාවිත කරලාත් HTTP 429 හෝ bot check එක පවතිනවා නම් එය code එකෙන් පමණක් විසඳිය නොහැක; YouTube සීමාව ඉවත් වනතුරු ඉන්න හෝ අවසර ලත් වෙනත් video source එකක් භාවිත කරන්න."
                 )
             ) from exc
 
         if "cookie" in lowered and ("invalid" in lowered or "expired" in lowered or "no longer valid" in lowered):
             raise HTTPException(
                 status_code=503,
-                detail="YouTube cookies à·€à¶½à¶‚à¶œà·” à¶±à·à¶­ à·„à· à¶šà¶½à·Š à¶‰à¶šà·”à¶­à·Š à·€à·“ à¶‡à¶­. YOUTUBE_COOKIES_FILE à·„à·’ private cookies file à¶‘à¶š à¶…à¶½à·”à¶­à·Š à¶šà¶»à¶±à·Šà¶±, à¶±à·à¶­à·Šà¶±à¶¸à·Š à¶‘à¶¸ environment variable à¶‘à¶š à¶‰à·€à¶­à·Š à¶šà¶» public video à¶‘à¶šà¶šà·Š à¶±à·à·€à¶­ à¶´à¶»à·“à¶šà·Šà·‚à· à¶šà¶»à¶±à·Šà¶±."
+                detail="YOUTUBE_COOKIES_FILE හි cookies වලංගු නැත හෝ කල් ඉකුත් වී ඇත. ඒවා private storage එකේ fresh Netscape cookies file එකකින් ප්‍රතිස්ථාපනය කරන්න, නැත්නම් YOUTUBE_COOKIES_FILE ඉවත් කර public video එකක් පරීක්ෂා කරන්න. Cookies GitHub වෙත upload නොකරන්න."
             ) from exc
 
         raise HTTPException(
             status_code=502,
-            detail=f"YouTube à·€à·™à¶­à·’à¶±à·Š video à¶½à¶¶à·à¶œà·à¶±à·“à¶¸à¶§ à¶±à·œà·„à·à¶šà·’ à·€à·’à¶º: {message[:500]}"
+            detail=f"YouTube වෙතින් video ලබාගැනීමට නොහැකි විය: {message[:500]}"
         ) from exc
 
 @app.post("/process-video")
@@ -418,7 +424,7 @@ def process_video(req: ProcessVideoReq):
         email_key = normalize_email(req.email)
         if not email_key or "@" not in email_key:
             conn.close()
-            raise HTTPException(status_code=400, detail="à·€à¶½à¶‚à¶œà·” email à¶½à·’à¶´à·’à¶±à¶ºà¶šà·Š à¶…à·€à·à·Šâ€à¶ºà¶ºà·’.")
+            raise HTTPException(status_code=400, detail="වලංගු email ලිපිනයක් අවශ්‍යයි.")
         is_admin_email = bool(ADMIN_EMAIL) and email_key == normalize_email(ADMIN_EMAIL)
         try:
             cursor.execute(
@@ -441,21 +447,21 @@ def process_video(req: ProcessVideoReq):
             user = cursor.fetchone()
         except sqlite3.Error as exc:
             conn.close()
-            raise HTTPException(status_code=500, detail=f"User record à¶‘à¶š à·ƒà¶šà·ƒà·Š à¶šà·’à¶»à·“à¶¸à¶§ à¶±à·œà·„à·à¶šà·’ à·€à·’à¶º: {exc}")
+            raise HTTPException(status_code=500, detail=f"User record එක සකස් කිරීමට නොහැකි විය: {exc}")
         if not user:
             conn.close()
-            raise HTTPException(status_code=500, detail="User record à¶‘à¶š à·ƒà¶šà·ƒà·Š à¶šà·’à¶»à·“à¶¸à¶§ à¶±à·œà·„à·à¶šà·’ à·€à·’à¶º.")
+            raise HTTPException(status_code=500, detail="User record එක සකස් කිරීමට නොහැකි විය.")
 
     is_vip, clips_used = user[0], user[1] or 0
 
     max_per_link = 10 if is_vip else 2
     if req.clip_count < 1 or req.clip_count > max_per_link:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"à·€à·“à¶©à·’à¶ºà· 1 à·ƒà·’à¶§ {max_per_link} à¶¯à¶šà·Šà·€à· à¶­à·à¶»à¶±à·Šà¶±.")
+        raise HTTPException(status_code=403, detail=f"වීඩියෝ 1 සිට {max_per_link} දක්වා තෝරන්න.")
 
     if not is_vip and (clips_used + req.clip_count) > 30:
         conn.close()
-        raise HTTPException(status_code=403, detail=f"Free à¶¸à·à·ƒà·’à¶š à·ƒà·“à¶¸à·à·€ (à·€à·“à¶©à·’à¶ºà· 30) à¶…à·€à·ƒà¶±à·Š! (à¶¯à·à¶±à¶§: {clips_used}). VIP à¶½à¶¶à·à¶œà¶±à·Šà¶±.")
+        raise HTTPException(status_code=403, detail=f"Free මාසික සීමාව (වීඩියෝ 30) අවසන්! (දැනට: {clips_used}). VIP ලබාගන්න.")
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
@@ -497,7 +503,7 @@ def process_video(req: ProcessVideoReq):
             )
 
             if not is_vip:
-                vf_filter = base_filter + ",drawtext=text='âœ¨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
+                vf_filter = base_filter + ",drawtext=text='✨ ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55:shadowcolor=black@0.4:shadowx=2:shadowy=2"
             else:
                 vf_filter = base_filter
 
@@ -563,4 +569,4 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "10000")),
-        )
+    )
