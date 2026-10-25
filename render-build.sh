@@ -8,6 +8,7 @@ import random
 import urllib.request
 import math
 from datetime import datetime, timedelta
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -54,7 +55,7 @@ if not (os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK)):
 
 @app.get("/")
 def root():
-    return {"service": "ShortsFlow AI Backend", "status": "online", "mode": "multi_social_no_yt"}
+    return {"service": "ShortsFlow AI Backend", "status": "online"}
 
 @app.get("/health")
 def health():
@@ -103,17 +104,17 @@ def generate_metadata_with_gemini(video_title: str, part_num: int, total_parts: 
     if not GEMINI_API_KEY:
         return {
             "title": fallback_title,
-            "description": f"Must watch highlight from {clean_title}! Share, like and follow for more.",
+            "description": f"Highlight moment from {clean_title}! Follow and share.",
             "hashtags": "#Shorts #Viral #Trending #FYP #Reels"
         }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"""
-    Video title: "{video_title}". Part {part_num} of {total_parts}.
+    Video topic: "{video_title}". Part {part_num} of {total_parts}.
     Create a viral Title (under 45 chars) with an emoji ending with "{suffix}".
     Respond ONLY in strict JSON:
     {{
-        "title": "Title with emoji{suffix}",
+        "title": "Dramatic Title{suffix}",
         "description": "Engaging 2-sentence description summarizing this part",
         "hashtags": "#Viral #Trending #FYP #Reels #Shorts"
     }}
@@ -154,7 +155,8 @@ class ActivateVipReq(BaseModel):
 
 class ProcessVideoReq(BaseModel):
     email: str
-    video_url: str
+    video_url: Optional[str] = None
+    youtube_url: Optional[str] = None
 
 @app.post("/auth/register")
 def register(req: AuthReq):
@@ -252,17 +254,15 @@ def activate_vip(req: ActivateVipReq):
     conn.close()
     return {"status": "success", "message": f"{req.target_user_email} VIP සක්‍රීය විය!"}
 
-# --- Social Video Downloader (No YouTube) ---
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     if not clean_url:
         raise HTTPException(status_code=400, detail="කරුණාකර video link එකක් ඇතුළත් කරන්න.")
 
-    # YouTube Link Block කිරීම
     if "youtube.com" in clean_url or "youtu.be" in clean_url:
         raise HTTPException(
             status_code=400, 
-            detail="YouTube සහය නොදක්වයි. කරුණාකර Facebook Reels, TikTok, Instagram Reels, Twitter (X), Pinterest හෝ Reddit වීඩියෝ link එකක් ලබා දෙන්න."
+            detail="YouTube සහය නොදක්වයි. කරුණාකර Facebook, TikTok, Instagram, Twitter (X), Pinterest වීඩියෝ link එකක් ලබා දෙන්න."
         )
 
     ydl_opts = {
@@ -291,7 +291,7 @@ def download_social_video(url: str, output_path: str):
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"වීඩියෝව බාගත කිරීම අසාර්ථක විය (Public Link එකක් දැයි පරීක්ෂා කරන්න): {str(exc)[:250]}"
+            detail=f"වීඩියෝව බාගත කිරීම අසාර්ථක විය: {str(exc)[:250]}"
         ) from exc
 
 @app.post("/process-video")
@@ -329,34 +329,35 @@ def process_video(req: ProcessVideoReq):
 
     is_vip, clips_used = user[0], user[1] or 0
 
-    # මාසික Free Limit පරීක්ෂාව (වීඩියෝ 15 සීමාව)
     if not is_vip and clips_used >= 15:
         conn.close()
         raise HTTPException(
             status_code=403, 
-            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට සාදා ඇත: {clips_used}). Unlimited වීඩියෝ සෑදීමට PRO VIP ලබාගන්න."
+            detail=f"Free මාසික සීමාව (වීඩියෝ 15) අවසන්! (දැනට සාදා ඇත: {clips_used}). Unlimited වීඩියෝ සඳහා PRO VIP ලබාගන්න."
         )
+
+    url_to_process = (req.video_url or req.youtube_url or "").strip()
+    if not url_to_process:
+        conn.close()
+        raise HTTPException(status_code=400, detail="කරුණාකර වලංගු Video URL එකක් ඇතුළත් කරන්න.")
 
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
 
     try:
-        video_title, total_duration = download_social_video(req.video_url, raw_video)
+        video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        # Free අයට උපරිම විනාඩි 10 (තත්පර 600)
         if not is_vip and total_duration > 600:
             raise HTTPException(
                 status_code=403,
-                detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration/60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි. විනාඩි 10 ට වැඩි දිග වීඩියෝ සඳහා VIP ලබාගන්න."
+                detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration/60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
             )
 
-        # විනාඩි 3 (තත්පර 180) බැගින් Parts වලට වෙන් කිරීම
         PART_DURATION = 180
         total_parts = math.ceil(total_duration / PART_DURATION)
         if total_parts < 1:
             total_parts = 1
 
-        # Free අයට ඉතිරි quota එක අනුව parts සීමා කිරීම
         parts_to_generate = total_parts
         if not is_vip:
             remaining_quota = 15 - clips_used
@@ -385,7 +386,6 @@ def process_video(req: ProcessVideoReq):
                 .replace("\\n", " ")
             )
 
-            # Anti-Copyright Repurpose Filter Complex
             base_filter = (
                 "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=15:5[bg];"
                 "[0:v]scale=720:-1,eq=brightness=0.03:saturation=1.12:contrast=1.05,setpts=0.97*PTS[fg];"
@@ -417,7 +417,6 @@ def process_video(req: ProcessVideoReq):
                 "hashtags": meta.get("hashtags", "")
             })
 
-        # හැදුනු parts ගණන මාසික ගිණුමෙන් අඩු කිරීම
         if not is_vip:
             cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + ? WHERE LOWER(TRIM(email)) = ?", (len(output_data), normalize_email(req.email)))
             conn.commit()
