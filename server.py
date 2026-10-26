@@ -201,12 +201,12 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[height<=360]/best",
+        "format": "best[height<=480]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 20,
+        "socket_timeout": 30,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -225,10 +225,10 @@ def download_social_video(url: str, output_path: str):
         if duration <= 1:
             try:
                 cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 duration = float(res.stdout.strip())
             except Exception:
-                duration = 20.0
+                duration = 30.0
 
         return info.get("title") or "Viral Video", max(3.0, duration)
 
@@ -263,11 +263,10 @@ async def process_video(request: Request):
                 detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
             )
 
-        # උපරිම කොටස් 3 කට සීමා කර අතිශය වේගයෙන් සැකසීම
         part_duration = 30
         total_parts = max(1, math.ceil(total_duration / part_duration))
-        if total_parts > 3:
-            total_parts = 3
+        if total_parts > 5:
+            total_parts = 5
 
         for i in range(total_parts):
             start_sec = i * part_duration
@@ -286,12 +285,13 @@ async def process_video(request: Request):
 
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-vf", vf_filter, "-c:v", "libx264", "-crf", "34",
+                "-vf", vf_filter, "-c:v", "libx264", "-crf", "32",
                 "-preset", "ultrafast", "-threads", "2", "-an",
                 "-movflags", "+faststart", final_path,
             ]
 
-            subprocess.run(command, check=True, timeout=25, capture_output=True, text=True)
+            # Timeout සීමාව තත්පර 180 (විනාඩි 3) දක්වා ඉහළ නංවා ඇත
+            subprocess.run(command, check=True, timeout=180, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
