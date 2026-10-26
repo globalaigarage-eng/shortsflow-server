@@ -22,7 +22,7 @@ logger = logging.getLogger("shortsflow")
 app = FastAPI(title="ShortsFlow Social Media AI Backend")
 
 PUBLIC_BASE_URL = os.environ.get(
-    "PUBLIC_BASE_URL", "https://shortsflow-server.onrender.com"
+    "PUBLIC_BASE_URL", "https://dangerous-zonda-anushkamalshan6-62ecb98b.koyeb.app"
 ).strip().rstrip("/")
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -77,7 +77,6 @@ def get_first_string(data: dict, *keys: str) -> str:
 def clean_viral_title(title: str) -> str:
     if not title:
         return "Viral Highlight Video"
-    # Views, likes, reactions වැනි අනවශ්‍ය සංඛ්‍යාලේඛන ඉවත් කිරීම
     cleaned = re.sub(r'[\d,.]+[KM]?\s*(views?|likes?|shares?|reactions?|comments?).*?[\|–\-—]', '', title, flags=re.IGNORECASE)
     cleaned = re.sub(r'[\d,.]+[KM]?\s*(views?|likes?|shares?|reactions?|comments?)', '', cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" |–—•·")
@@ -131,12 +130,17 @@ app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 @app.post("/auth/register")
 async def register(request: Request):
-    data = read_json_body(await request.json())
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    data = read_json_body(body)
     email = normalize_email(get_first_string(data, "email", "user_email"))
     password = get_first_string(data, "password")
     device_id = get_first_string(data, "device_id") or "UNKNOWN"
+
     if not email or not password:
-        raise HTTPException(status_code=400, detail="Email සහ Password අවශ්‍යයි.")
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Email සහ Password අවශ්‍යයි."})
     
     conn = get_db_connection()
     try:
@@ -149,16 +153,25 @@ async def register(request: Request):
         conn.commit()
         return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත.")
+        return JSONResponse(status_code=400, content={"status": "error", "message": "මෙම Email එක දැනටමත් ලියාපදිංචි කර ඇත."})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(exc)})
     finally:
         conn.close()
 
 @app.post("/auth/login")
 async def login(request: Request):
-    data = read_json_body(await request.json())
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    data = read_json_body(body)
     email = normalize_email(get_first_string(data, "email", "user_email"))
     password = get_first_string(data, "password")
     
+    if not email or not password:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Email සහ Password අවශ්‍යයි."})
+
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -168,7 +181,7 @@ async def login(request: Request):
         conn.close()
 
     if not user or user[1] != password:
-        raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
+        return JSONResponse(status_code=401, content={"status": "error", "message": "Email හෝ Password වැරදියි."})
     
     user_email, _, is_vip, vip_expiry, clips_used, last_reset = user
     current_month = datetime.now().strftime("%Y-%m")
@@ -201,7 +214,11 @@ async def forgot_password(request: Request):
 
 @app.post("/auth/reset-password")
 async def reset_password(request: Request):
-    data = read_json_body(await request.json())
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    data = read_json_body(body)
     email = normalize_email(get_first_string(data, "email"))
     new_password = get_first_string(data, "new_password", "password")
     conn = get_db_connection()
@@ -214,7 +231,11 @@ async def reset_password(request: Request):
 
 @app.post("/admin/activate-vip")
 async def activate_vip(request: Request):
-    data = read_json_body(await request.json())
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    data = read_json_body(body)
     target_user_email = normalize_email(get_first_string(data, "target_user_email", "user_email"))
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = get_db_connection()
@@ -271,7 +292,7 @@ async def process_video(request: Request):
     url_to_process = get_first_string(body, "video_url", "youtube_url", "url", "link")
 
     if not user_email or not url_to_process:
-        raise HTTPException(status_code=400, detail="Email සහ Video URL අවශ්‍යයි.")
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Email සහ Video URL අවශ්‍යයි."})
 
     conn = get_db_connection()
     raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
@@ -283,7 +304,7 @@ async def process_video(request: Request):
         user = cursor.fetchone()
         
         if not user:
-            raise HTTPException(status_code=404, detail="පරිශීලකයා හමු නොවීය.")
+            return JSONResponse(status_code=404, content={"status": "error", "message": "පරිශීලකයා හමු නොවීය."})
 
         is_vip, clips_used, last_reset = user
         current_month = datetime.now().strftime("%Y-%m")
@@ -296,20 +317,13 @@ async def process_video(request: Request):
         is_admin = user_email == ADMIN_EMAIL
         
         if not is_vip and not is_admin and clips_used >= 15:
-            raise HTTPException(
-                status_code=403,
-                detail="මෙම මස සඳහා ඔබට හිමි Free වීඩියෝ 15ක සීමාව අවසන් වී ඇත. අසීමිතව භාවිත කිරීමට VIP ලබාගන්න."
-            )
+            return JSONResponse(status_code=403, content={"status": "error", "message": "මෙම මස සඳහා ඔබට හිමි Free වීඩියෝ 15ක සීමාව අවසන් වී ඇත. VIP ලබාගන්න."})
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
         if not is_vip and not is_admin and total_duration > 600:
-            raise HTTPException(
-                status_code=403,
-                detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
-            )
+            return JSONResponse(status_code=403, content={"status": "error", "message": "Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."})
 
-        # හරියටම විනාඩි 3 (තත්පර 180) බැගින් කොටස් වලට කැඩීම
         part_duration = 180
         total_parts = max(1, math.ceil(total_duration / part_duration))
         if not is_vip and not is_admin and total_parts > 4:
@@ -326,7 +340,6 @@ async def process_video(request: Request):
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            # Anti-copyright සඳහා ස්කේල්, පෑඩ් සහ ලයිට් එන්කෝඩින් (ultrafast preset) භාවිතයෙන් වේගවත් ප්‍රොසෙසින්
             vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
             if not is_vip and not is_admin:
                 vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
@@ -339,7 +352,6 @@ async def process_video(request: Request):
                 "-movflags", "+faststart", final_path,
             ]
 
-            # Timeout සීමාව තත්පර 300 ක් ලෙස සකසා ඇත
             subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
 
             output_data.append({
@@ -357,14 +369,10 @@ async def process_video(request: Request):
 
     except Exception as exc:
         logger.exception("Processing error")
-        raise HTTPException(status_code=500, detail=f"දෝෂයක් ඇති විය: {str(exc)[:180]}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"දෝෂයක් ඇති විය: {str(exc)[:180]}"})
     finally:
         safe_remove(raw_video)
         conn.close()
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 if __name__ == "__main__":
     import uvicorn
