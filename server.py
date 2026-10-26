@@ -201,12 +201,12 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[height<=480]/best",
+        "format": "best[height<=360]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 30,
+        "socket_timeout": 20,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -225,10 +225,10 @@ def download_social_video(url: str, output_path: str):
         if duration <= 1:
             try:
                 cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
                 duration = float(res.stdout.strip())
             except Exception:
-                duration = 30.0
+                duration = 20.0
 
         return info.get("title") or "Viral Video", max(3.0, duration)
 
@@ -263,11 +263,11 @@ async def process_video(request: Request):
                 detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
             )
 
-        # සෑම කොටසක්ම උපරිම තත්පර 50 (හෝ අවශ්‍ය නම් වෙනස් කළ හැක) ලෙස කඩා අතිශය වේගයෙන් ප්‍රොසෙසින් කිරීම
-        part_duration = 50
+        # උපරිම කොටස් 3 කට සීමා කර අතිශය වේගයෙන් සැකසීම
+        part_duration = 30
         total_parts = max(1, math.ceil(total_duration / part_duration))
-        if total_parts > 5:
-            total_parts = 5  # උපරිම කොටස් 5 කට සීමා කර ඇත
+        if total_parts > 3:
+            total_parts = 3
 
         for i in range(total_parts):
             start_sec = i * part_duration
@@ -280,20 +280,18 @@ async def process_video(request: Request):
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            # ඉතා සැහැල්ලු සහ වේගවත් ෆිල්ටර් (අතිශයින් වේගවත් ප්‍රොසෙසින් සඳහා)
             vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
             if not is_vip:
                 vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
 
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-vf", vf_filter, "-c:v", "libx264", "-crf", "32",
+                "-vf", vf_filter, "-c:v", "libx264", "-crf", "34",
                 "-preset", "ultrafast", "-threads", "2", "-an",
                 "-movflags", "+faststart", final_path,
             ]
 
-            # Timeout සීමාව තත්පර 120 ක් ලෙස තබා ඇත (කොටස් කුඩා බැවින් තත්පර 10කින් හැදී අවසන් වේ)
-            subprocess.run(command, check=True, timeout=120, capture_output=True, text=True)
+            subprocess.run(command, check=True, timeout=25, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
