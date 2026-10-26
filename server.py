@@ -74,6 +74,17 @@ def get_first_string(data: dict, *keys: str) -> str:
                 return value
     return ""
 
+def clean_viral_title(title: str) -> str:
+    if not title:
+        return "Viral Highlight Video"
+    # Views, likes, reactions වැනි අනවශ්‍ය සංඛ්‍යාලේඛන ඉවත් කිරීම
+    cleaned = re.sub(r'[\d,.]+[KM]?\s*(views?|likes?|shares?|reactions?|comments?).*?[\|–\-—]', '', title, flags=re.IGNORECASE)
+    cleaned = re.sub(r'[\d,.]+[KM]?\s*(views?|likes?|shares?|reactions?|comments?)', '', cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" |–—•·")
+    if not cleaned:
+        cleaned = title[:40]
+    return cleaned.strip()
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH) or PROJECT_DIR, exist_ok=True)
     conn = get_db_connection()
@@ -162,7 +173,6 @@ async def login(request: Request):
     user_email, _, is_vip, vip_expiry, clips_used, last_reset = user
     current_month = datetime.now().strftime("%Y-%m")
 
-    # සෑම මසකම 1 වන දිනට Free වීඩියෝ 15 සීමාව ස්වයංක්‍රීයව අලුත් වීම (Reset)
     if last_reset != current_month:
         conn = get_db_connection()
         try:
@@ -223,7 +233,7 @@ def download_social_video(url: str, output_path: str):
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 20,
+        "socket_timeout": 30,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -242,12 +252,13 @@ def download_social_video(url: str, output_path: str):
         if duration <= 1:
             try:
                 cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 duration = float(res.stdout.strip())
             except Exception:
                 duration = 30.0
 
-        return info.get("title") or "Viral Video", max(3.0, duration)
+        raw_title = info.get("title") or "Viral Video"
+        return clean_viral_title(raw_title), max(3.0, duration)
 
 @app.post("/process-video")
 async def process_video(request: Request):
@@ -298,10 +309,11 @@ async def process_video(request: Request):
                 detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
             )
 
-        part_duration = 30
+        # හරියටම විනාඩි 3 (තත්පර 180) බැගින් කොටස් වලට කැඩීම
+        part_duration = 180
         total_parts = max(1, math.ceil(total_duration / part_duration))
-        if total_parts > 3:
-            total_parts = 3
+        if not is_vip and not is_admin and total_parts > 4:
+            total_parts = 4
 
         for i in range(total_parts):
             start_sec = i * part_duration
@@ -314,19 +326,26 @@ async def process_video(request: Request):
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            # Re-encode කිරීම වෙනුවට stream copy (-c:v copy) භාවිතයෙන් තත්පර 1කින් වීඩියෝව කපා ගැනීම (Render Timeout සම්පූර්ණයෙන්ම වළකාගත හැක)
+            # Anti-copyright සඳහා ස්කේල්, පෑඩ් සහ ලයිට් එන්කෝඩින් (ultrafast preset) භාවිතයෙන් වේගවත් ප්‍රොසෙසින්
+            vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
+            if not is_vip and not is_admin:
+                vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
+
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                "-vf", vf_filter, "-c:v", "libx264", "-crf", "28",
+                "-preset", "ultrafast", "-threads", "2",
+                "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart", final_path,
             ]
 
-            subprocess.run(command, check=True, timeout=15, capture_output=True, text=True)
+            # Timeout සීමාව තත්පර 300 ක් ලෙස සකසා ඇත
+            subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
-                "title": f"{video_title} (Part {i+1})",
-                "description": f"Highlight part {i+1} from {video_title}",
+                "title": f"{video_title} (Part {i+1})" if total_parts > 1 else video_title,
+                "description": f"Viral highlight part {i+1} from {video_title}",
                 "hashtags": "#Shorts #Viral #Trending #FYP",
             })
 
