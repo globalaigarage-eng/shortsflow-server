@@ -4,10 +4,10 @@ import sqlite3
 import subprocess
 import shutil
 import json
-import random
-import urllib.request
 import math
 import logging
+import urllib.request
+import tarfile
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -35,12 +35,46 @@ DB_PATH = os.environ.get(
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
 
-FFMPEG_DIR = "/opt/render/project/.render/ffmpeg"
-FFMPEG_CANDIDATE = os.path.join(FFMPEG_DIR, "ffmpeg")
-if os.path.isfile(FFMPEG_CANDIDATE) and os.access(FFMPEG_CANDIDATE, os.X_OK):
-    FFMPEG_BIN = FFMPEG_CANDIDATE
-else:
-    FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+# ස්වයංක්‍රීයව FFmpeg බිනරි එක සර්වර් එකට ලබා ගැනීම (Auto Setup FFmpeg)
+LOCAL_FFMPEG_DIR = os.path.join(PROJECT_DIR, "ffmpeg_bin")
+FFMPEG_BIN = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg")
+
+def ensure_ffmpeg():
+    global FFMPEG_BIN
+    if os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK):
+        return FFMPEG_BIN
+    
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        FFMPEG_BIN = sys_ffmpeg
+        return FFMPEG_BIN
+
+    os.makedirs(LOCAL_FFMPEG_DIR, exist_ok=True)
+    tar_path = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg.tar.xz")
+    url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    
+    try:
+        logger.info("Downloading static FFmpeg binary...")
+        urllib.request.urlretrieve(url, tar_path)
+        with tarfile.open(tar_path, "r:xz") as tar:
+            for member in tar.getmembers():
+                if member.name.endswith("ffmpeg") or member.name.endswith("ffprobe"):
+                    member.name = os.path.basename(member.name)
+                    tar.extract(member, LOCAL_FFMPEG_DIR)
+        os.remove(tar_path)
+        for f in ["ffmpeg", "ffprobe"]:
+            fp = os.path.join(LOCAL_FFMPEG_DIR, f)
+            if os.path.exists(fp):
+                os.chmod(fp, 0o755)
+        if os.path.isfile(FFMPEG_BIN):
+            logger.info("FFmpeg successfully set up locally!")
+            return FFMPEG_BIN
+    except Exception as e:
+        logger.error(f"Failed to auto-download ffmpeg: {e}")
+    
+    return "ffmpeg"
+
+ensure_ffmpeg()
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().casefold()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
@@ -124,7 +158,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ffmpeg_available": True}
+    return {"status": "ok", "ffmpeg_available": os.path.isfile(FFMPEG_BIN)}
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
@@ -272,7 +306,7 @@ def download_social_video(url: str, output_path: str):
         duration = float(info.get("duration") or 0)
         if duration <= 1:
             try:
-                cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
+                cmd = [FFMPEG_BIN.replace("ffmpeg", "ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 duration = float(res.stdout.strip())
             except Exception:
