@@ -126,6 +126,7 @@ async def register(request: Request):
     device_id = get_first_string(data, "device_id") or "UNKNOWN"
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email සහ Password අවශ්‍යයි.")
+    
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -146,20 +147,36 @@ async def login(request: Request):
     data = read_json_body(await request.json())
     email = normalize_email(get_first_string(data, "email", "user_email"))
     password = get_first_string(data, "password")
+    
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT email, password, is_vip, vip_expiry, monthly_clips_used FROM users WHERE LOWER(TRIM(email)) = ?", (email,))
+        cursor.execute("SELECT email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month FROM users WHERE LOWER(TRIM(email)) = ?", (email,))
         user = cursor.fetchone()
     finally:
         conn.close()
+
     if not user or user[1] != password:
         raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
-    user_email, _, is_vip, vip_expiry, clips_used = user
+    
+    user_email, _, is_vip, vip_expiry, clips_used, last_reset = user
+    current_month = datetime.now().strftime("%Y-%m")
+
+    # ස්වයංක්‍රීය මාසික රෙසෙට් කිරීම (පළමුවැනිදාට 0 වීම)
+    if last_reset != current_month:
+        conn = get_db_connection()
+        try:
+            conn.execute("UPDATE users SET monthly_clips_used = 0, last_reset_month = ? WHERE LOWER(TRIM(email)) = ?", (current_month, user_email))
+            conn.commit()
+            clips_used = 0
+        finally:
+            conn.close()
+
     is_admin = bool(ADMIN_EMAIL) and normalize_email(user_email) == normalize_email(ADMIN_EMAIL)
     if is_admin:
         is_vip = 1
         vip_expiry = "2099-12-31"
+
     return {
         "status": "success",
         "email": user_email,
@@ -251,13 +268,33 @@ async def process_video(request: Request):
 
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT is_vip FROM users WHERE LOWER(TRIM(email)) = ?", (user_email,))
+        cursor.execute("SELECT is_vip, monthly_clips_used, last_reset_month FROM users WHERE LOWER(TRIM(email)) = ?", (user_email,))
         user = cursor.fetchone()
-        is_vip = 1 if (user and user[0] == 1) or user_email == ADMIN_EMAIL else 0
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="පරිශීලකයා හමු නොවීය.")
+
+        is_vip, clips_used, last_reset = user
+        current_month = datetime.now().strftime("%Y-%m")
+
+        # මාසය මාරු වී ඇත්නම් Free සීමාව 0 ට රෙසෙට් කිරීම
+        if last_reset != current_month:
+            clips_used = 0
+            cursor.execute("UPDATE users SET monthly_clips_used = 0, last_reset_month = ? WHERE LOWER(TRIM(email)) = ?", (current_month, user_email))
+            conn.commit()
+
+        is_admin = user_email == ADMIN_EMAIL
+        
+        # Free පරිශීලකයින් සඳහා මසකට වීඩියෝ 15 ක සීමාව පරීක්ෂා කිරීම
+        if not is_vip and not is_admin and clips_used >= 15:
+            raise HTTPException(
+                status_code=403,
+                detail="මෙම මස සඳහා ඔබට හිමි Free වීඩියෝ 15ක සීමාව අවසන් වී ඇත. අසීමිතව භාවිත කිරීමට VIP ලබාගන්න."
+            )
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        if not is_vip and total_duration > 600:
+        if not is_vip and not is_admin and total_duration > 600:
             raise HTTPException(
                 status_code=403,
                 detail=f"මෙම වීඩියෝව විනාඩි {math.ceil(total_duration / 60)} කි. Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."
@@ -280,7 +317,7 @@ async def process_video(request: Request):
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
             vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
-            if not is_vip:
+            if not is_vip and not is_admin:
                 vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
 
             command = [
@@ -290,8 +327,8 @@ async def process_video(request: Request):
                 "-movflags", "+faststart", final_path,
             ]
 
-            # Timeout සීමාව තත්පර 180 (විනාඩි 3) දක්වා ඉහළ නංවා ඇත
-            subprocess.run(command, check=True, timeout=180, capture_output=True, text=True)
+            # Timeout සීමාව තත්පර 300 දක්වා ඉහළ නංවා ඇත
+            subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
@@ -299,6 +336,11 @@ async def process_video(request: Request):
                 "description": f"Highlight part {i+1} from {video_title}",
                 "hashtags": "#Shorts #Viral #Trending #FYP",
             })
+
+        # සාර්ථකව හැදුණු පසු Free භාවිත ගණන 1 කින් වැඩි කිරීම (Admin/VIP අයට වැඩි නොවේ)
+        if not is_vip and not is_admin:
+            cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + 1 WHERE LOWER(TRIM(email)) = ?", (user_email,))
+            conn.commit()
 
         return {"status": "success", "results": output_data}
 
