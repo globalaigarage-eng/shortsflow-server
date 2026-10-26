@@ -35,7 +35,7 @@ DB_PATH = os.environ.get(
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
 
-# ස්වයංක්‍රීයව FFmpeg බිනරි එක සර්වර් එකට ලබා ගැනීම (Auto Setup FFmpeg)
+# ස්වයංක්‍රීයව FFmpeg බිනරි එක සර්වර් එකට ලබා ගැනීම
 LOCAL_FFMPEG_DIR = os.path.join(PROJECT_DIR, "ffmpeg_bin")
 FFMPEG_BIN = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg")
 
@@ -283,12 +283,12 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[height<=480]/best",
+        "format": "best[height<=360][ext=mp4]/best[height<=360]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 30,
+        "socket_timeout": 15,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -307,7 +307,7 @@ def download_social_video(url: str, output_path: str):
         if duration <= 1:
             try:
                 cmd = [FFMPEG_BIN.replace("ffmpeg", "ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
                 duration = float(res.stdout.strip())
             except Exception:
                 duration = 30.0
@@ -380,9 +380,9 @@ async def process_video(request: Request):
 
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-vf", vf_filter, "-c:v", "libx264", "-crf", "28",
-                "-preset", "ultrafast", "-threads", "2",
-                "-c:a", "aac", "-b:a", "128k",
+                "-vf", vf_filter, "-c:v", "libx264", "-crf", "32",
+                "-preset", "ultrafast", "-threads", "4",
+                "-c:a", "aac", "-b:a", "96k",
                 "-movflags", "+faststart", final_path,
             ]
 
