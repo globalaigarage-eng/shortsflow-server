@@ -162,7 +162,7 @@ async def login(request: Request):
     user_email, _, is_vip, vip_expiry, clips_used, last_reset = user
     current_month = datetime.now().strftime("%Y-%m")
 
-    # ස්වයංක්‍රීය මාසික රෙසෙට් කිරීම (පළමුවැනිදාට 0 වීම)
+    # සෑම මසකම 1 වන දිනට Free වීඩියෝ 15 සීමාව ස්වයංක්‍රීයව අලුත් වීම (Reset)
     if last_reset != current_month:
         conn = get_db_connection()
         try:
@@ -223,7 +223,7 @@ def download_social_video(url: str, output_path: str):
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 30,
+        "socket_timeout": 20,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -242,7 +242,7 @@ def download_social_video(url: str, output_path: str):
         if duration <= 1:
             try:
                 cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
                 duration = float(res.stdout.strip())
             except Exception:
                 duration = 30.0
@@ -277,7 +277,6 @@ async def process_video(request: Request):
         is_vip, clips_used, last_reset = user
         current_month = datetime.now().strftime("%Y-%m")
 
-        # මාසය මාරු වී ඇත්නම් Free සීමාව 0 ට රෙසෙට් කිරීම
         if last_reset != current_month:
             clips_used = 0
             cursor.execute("UPDATE users SET monthly_clips_used = 0, last_reset_month = ? WHERE LOWER(TRIM(email)) = ?", (current_month, user_email))
@@ -285,7 +284,6 @@ async def process_video(request: Request):
 
         is_admin = user_email == ADMIN_EMAIL
         
-        # Free පරිශීලකයින් සඳහා මසකට වීඩියෝ 15 ක සීමාව පරීක්ෂා කිරීම
         if not is_vip and not is_admin and clips_used >= 15:
             raise HTTPException(
                 status_code=403,
@@ -302,8 +300,8 @@ async def process_video(request: Request):
 
         part_duration = 30
         total_parts = max(1, math.ceil(total_duration / part_duration))
-        if total_parts > 5:
-            total_parts = 5
+        if total_parts > 3:
+            total_parts = 3
 
         for i in range(total_parts):
             start_sec = i * part_duration
@@ -316,19 +314,14 @@ async def process_video(request: Request):
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-            vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
-            if not is_vip and not is_admin:
-                vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
-
+            # Re-encode කිරීම වෙනුවට stream copy (-c:v copy) භාවිතයෙන් තත්පර 1කින් වීඩියෝව කපා ගැනීම (Render Timeout සම්පූර්ණයෙන්ම වළකාගත හැක)
             command = [
                 FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-vf", vf_filter, "-c:v", "libx264", "-crf", "32",
-                "-preset", "ultrafast", "-threads", "2", "-an",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart", final_path,
             ]
 
-            # Timeout සීමාව තත්පර 300 දක්වා ඉහළ නංවා ඇත
-            subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
+            subprocess.run(command, check=True, timeout=15, capture_output=True, text=True)
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
@@ -337,7 +330,6 @@ async def process_video(request: Request):
                 "hashtags": "#Shorts #Viral #Trending #FYP",
             })
 
-        # සාර්ථකව හැදුණු පසු Free භාවිත ගණන 1 කින් වැඩි කිරීම (Admin/VIP අයට වැඩි නොවේ)
         if not is_vip and not is_admin:
             cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + 1 WHERE LOWER(TRIM(email)) = ?", (user_email,))
             conn.commit()
