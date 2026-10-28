@@ -25,7 +25,7 @@ services:
       - key: ADMIN_PASSWORD
         value: "@Anushka*malshan2005"
       - key: GEMINI_API_KEY
-        value: "AQ.Ab8RN6IC1H6TKNvn84HyccS5GRT7sLB_oYrx97r3Oy35p_ia0Q"
+        value: ""
       - key: GEMINI_MODEL
         value: "gemini-2.5-flash"
       - key: FREE_MONTHLY_JOBS
