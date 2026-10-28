@@ -1,0 +1,40 @@
+# Review Koyeb's current manifest schema before deploying.
+# Prefer configuring these environment variables in the Koyeb dashboard.
+name: shortsflow
+services:
+  - name: shortsflow-api
+    type: web
+    ports:
+      - port: 8000
+        protocol: http
+    routes:
+      - path: /
+    docker:
+      dockerfile: Dockerfile
+    env:
+      - key: PORT
+        value: "8000"
+      - key: PUBLIC_BASE_URL
+        value: "https://YOUR-KOYEB-APP-DOMAIN"
+      - key: SHORTSFLOW_DATA_DIR
+        value: "/app/data"
+      - key: SHORTSFLOW_DB_PATH
+        value: "/app/data/shortsflow.db"
+      - key: ADMIN_EMAIL
+        value: "anushkamalshan666@gmail.com"
+      - key: ADMIN_PASSWORD
+        value: "@Anushka*malshan2005"
+      - key: GEMINI_API_KEY
+        value: "AQ.Ab8RN6IC1H6TKNvn84HyccS5GRT7sLB_oYrx97r3Oy35p_ia0Q"
+      - key: GEMINI_MODEL
+        value: "gemini-2.5-flash"
+      - key: FREE_MONTHLY_JOBS
+        value: "15"
+      - key: FREE_MAX_DURATION_SECONDS
+        value: "600"
+      - key: PART_DURATION_SECONDS
+        value: "180"
+      - key: MAX_DOWNLOAD_MB
+        value: "1500"
+      - key: JOB_RETENTION_DAYS
+        value: "3"
