@@ -1,7 +1,11 @@
 import os
 import re
 import sqlite3
+import subprocess
+import shutil
 import logging
+import urllib.request
+import tarfile
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -29,11 +33,56 @@ DB_PATH = os.environ.get(
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
 
+LOCAL_FFMPEG_DIR = os.path.join(PROJECT_DIR, "ffmpeg_bin")
+FFMPEG_BIN = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg")
+
+def ensure_ffmpeg():
+    global FFMPEG_BIN
+    if os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK):
+        return FFMPEG_BIN
+    
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        FFMPEG_BIN = sys_ffmpeg
+        return FFMPEG_BIN
+
+    os.makedirs(LOCAL_FFMPEG_DIR, exist_ok=True)
+    tar_path = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg.tar.xz")
+    url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    
+    try:
+        urllib.request.urlretrieve(url, tar_path)
+        with tarfile.open(tar_path, "r:xz") as tar:
+            for member in tar.getmembers():
+                if member.name.endswith("ffmpeg") or member.name.endswith("ffprobe"):
+                    member.name = os.path.basename(member.name)
+                    tar.extract(member, LOCAL_FFMPEG_DIR)
+        os.remove(tar_path)
+        for f in ["ffmpeg", "ffprobe"]:
+            fp = os.path.join(LOCAL_FFMPEG_DIR, f)
+            if os.path.exists(fp):
+                os.chmod(fp, 0o755)
+        if os.path.isfile(FFMPEG_BIN):
+            return FFMPEG_BIN
+    except Exception as e:
+        logger.error(f"Failed to auto-download ffmpeg: {e}")
+    
+    return "ffmpeg"
+
+ensure_ffmpeg()
+
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().casefold()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
 
 def normalize_email(email: Any) -> str:
     return str(email or "").strip().casefold()
+
+def safe_remove(path: str | None) -> None:
+    if path and os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -103,7 +152,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "ffmpeg_available": os.path.isfile(FFMPEG_BIN)}
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
@@ -225,32 +274,31 @@ async def activate_vip(request: Request):
         conn.close()
     return {"status": "success", "message": "VIP සක්‍රීය විය!"}
 
-def get_direct_video_stream(url: str):
+def download_and_process_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[ext=mp4]/best",
+        "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
+        "outtmpl": output_path,
+        "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 10,
+        "socket_timeout": 20,
         "noplaylist": True,
+        "merge_output_format": "mp4",
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
         },
     }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = yd_info = ydl.extract_info(clean_url, download=False)
-            title = yd_info.get("title") or "Viral TikTok Short"
-            v_url = yd_info.get("url")
-            if not v_url and "formats" in yd_info:
-                for f in yd_info["formats"]:
-                    if f.get("ext") == "mp4" and f.get("url"):
-                        v_url = f.get("url")
-                        break
-            return clean_viral_title(title), v_url or clean_url
-    except Exception as e:
-        logger.error(f"ytdl error: {e}")
-        return "Trending TikTok Viral Short #FYP", clean_url
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(clean_url, download=True)
+        downloaded_path = ydl.prepare_filename(info)
+        candidates = [output_path, os.path.splitext(output_path)[0] + ".mp4", downloaded_path]
+        actual_path = next((p for p in candidates if os.path.isfile(p)), output_path)
+        if actual_path != output_path and os.path.isfile(actual_path):
+            shutil.move(actual_path, output_path)
+        
+        raw_title = info.get("title") or "Viral TikTok Short"
+        return clean_viral_title(raw_title)
 
 @app.post("/process-video")
 async def process_video(request: Request):
@@ -266,6 +314,7 @@ async def process_video(request: Request):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Email සහ Video URL අවශ්‍යයි."})
 
     conn = get_db_connection()
+    raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
 
     try:
@@ -289,10 +338,31 @@ async def process_video(request: Request):
         if not is_vip and not is_admin and clips_used >= 15:
             return JSONResponse(status_code=403, content={"status": "error", "message": "මෙම මස සඳහා ඔබට හිමි Free වීඩියෝ 15ක සීමාව අවසන් වී ඇත. VIP ලබාගන්න."})
 
-        video_title, direct_stream_url = get_direct_video_stream(url_to_process)
+        video_title = download_and_process_video(url_to_process, raw_video)
+
+        clip_name = f"repurpose_{int(datetime.now().timestamp())}_1.mp4"
+        final_path = os.path.join(OUTPUT_DIR, clip_name)
+
+        # Anti-copyright ෆිල්ටර් සහ වෝටර්මාර්ක් සමඟ තත්පර 30ක වීඩියෝවක් සාදා ගැනීම
+        vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,eq=brightness=0.03:saturation=1.05"
+        if not is_vip and not is_admin:
+            vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
+
+        command = [
+            FFMPEG_BIN, "-y", "-i", raw_video, "-ss", "0", "-t", "30",
+            "-vf", vf_filter, 
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main", "-level", "3.0",
+            "-preset", "ultrafast", "-crf", "26",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+            "-movflags", "+faststart", final_path,
+        ]
+
+        result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+        if result.returncode != 0 or not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
+            return JSONResponse(status_code=500, content={"status": "error", "message": "වීඩියෝව ප්‍රොසෙසින් කිරීම අසාර්ථක විය."})
 
         output_data.append({
-            "clip_url": direct_stream_url,
+            "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
             "title": video_title,
             "description": f"Viral highlight from {video_title} #TikTok #Shorts #FYP",
             "hashtags": "#Shorts #Viral #Trending #FYP #TikTok",
@@ -308,6 +378,7 @@ async def process_video(request: Request):
         logger.exception("Processing error")
         return JSONResponse(status_code=500, content={"status": "error", "message": f"දෝෂයක් ඇති විය: {str(exc)[:180]}"})
     finally:
+        safe_remove(raw_video)
         conn.close()
 
 if __name__ == "__main__":
