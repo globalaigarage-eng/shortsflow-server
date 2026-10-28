@@ -53,7 +53,6 @@ def ensure_ffmpeg():
     url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
     
     try:
-        logger.info("Downloading static FFmpeg binary...")
         urllib.request.urlretrieve(url, tar_path)
         with tarfile.open(tar_path, "r:xz") as tar:
             for member in tar.getmembers():
@@ -66,7 +65,6 @@ def ensure_ffmpeg():
             if os.path.exists(fp):
                 os.chmod(fp, 0o755)
         if os.path.isfile(FFMPEG_BIN):
-            logger.info("FFmpeg successfully set up locally!")
             return FFMPEG_BIN
     except Exception as e:
         logger.error(f"Failed to auto-download ffmpeg: {e}")
@@ -354,10 +352,6 @@ async def process_video(request: Request):
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        # උපරිම කාලය තත්පර 30 ලෙස සීමා කිරීම
-        if not is_vip and not is_admin and total_duration > 30:
-            return JSONResponse(status_code=403, content={"status": "error", "message": "Free Plan එකේ උපරිම තත්පර 30 ක වීඩියෝ පමණි."})
-
         clip_name = f"repurpose_{int(datetime.now().timestamp())}_1.mp4"
         final_path = os.path.join(OUTPUT_DIR, clip_name)
 
@@ -365,7 +359,6 @@ async def process_video(request: Request):
         if not is_vip and not is_admin:
             vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
 
-        # නිවැරදි H.264 සහ AAC කෝඩෙක්ස් සමඟ වීඩියෝව සම්පූර්ණයෙන්ම රෙන්ඩර් කිරීම (ಪ್ලේ සහ ඩවුන්ලෝඩ් වීම සඳහා)
         command = [
             FFMPEG_BIN, "-y", "-i", raw_video, "-t", "30",
             "-vf", vf_filter, 
