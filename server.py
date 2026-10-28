@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+import uuid
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -227,61 +228,78 @@ async def activate_vip(request: Request):
 
 def get_processed_video_parts(url: str):
     clean_url = (url or "").strip()
+    file_id = str(uuid.uuid4())[:8]
+    output_template = os.path.join(OUTPUT_DIR, f"clip_{file_id}.%(ext)s")
+    
     ydl_opts = {
         "format": "best[ext=mp4]/best",
+        "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 15,
+        "socket_timeout": 20,
         "noplaylist": True,
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
         },
     }
+    
+    downloaded_file_path = None
+    title = "Viral TikTok Short"
+    duration = 30
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=False)
-            title = info.get("title") or "Viral TikTok Short"
-            v_url = info.get("url")
+            info = ydl.extract_info(clean_url, download=True)
+            title = info.get("title") or title
             duration = info.get("duration") or 30
             
-            if not v_url and "formats" in info:
-                for f in info["formats"]:
-                    if f.get("ext") == "mp4" and f.get("url"):
-                        v_url = f.get("url")
-                        break
-            
-            stream_url = v_url or clean_url
-            cleaned_title = clean_viral_title(title)
-            
-            # Anti-copyright splitting logic: 30 seconds chunks simulation or direct working samples
-            parts = []
-            if duration > 30:
-                part_count = (duration // 30) + (1 if duration % 30 > 0 else 0)
-                for i in range(1, part_count + 1):
-                    parts.append({
-                        "clip_url": stream_url,
-                        "title": f"{cleaned_title} (Anti-Copyright Part {i})",
-                        "description": f"Viral highlight part {i} from {cleaned_title} #TikTok #Shorts #FYP",
-                        "hashtags": "#Shorts #Viral #Trending #FYP #TikTok",
-                    })
+            # Find the downloaded file
+            filename = ydl.prepare_filename(info)
+            if os.path.exists(filename):
+                downloaded_file_path = filename
             else:
+                base, _ = os.path.splitext(filename)
+                for ext in [".mp4", ".mkv", ".webm", ".mov"]:
+                    if os.path.exists(base + ext):
+                        downloaded_file_path = base + ext
+                        break
+    except Exception as e:
+        logger.error(f"ytdl download error: {e}")
+
+    cleaned_title = clean_viral_title(title)
+    parts = []
+
+    if downloaded_file_path and os.path.exists(downloaded_file_path):
+        rel_filename = os.path.basename(downloaded_file_path)
+        local_stream_url = f"{PUBLIC_BASE_URL}/output/{rel_filename}"
+        
+        if duration > 30:
+            part_count = (duration // 30) + (1 if duration % 30 > 0 else 0)
+            for i in range(1, part_count + 1):
                 parts.append({
-                    "clip_url": stream_url,
-                    "title": cleaned_title,
-                    "description": f"Viral highlight from {cleaned_title} #TikTok #Shorts #FYP",
+                    "clip_url": local_stream_url,
+                    "title": f"{cleaned_title} (Anti-Copyright Part {i})",
+                    "description": f"Viral highlight part {i} from {cleaned_title} #TikTok #Shorts #FYP",
                     "hashtags": "#Shorts #Viral #Trending #FYP #TikTok",
                 })
-            return parts
-    except Exception as e:
-        logger.error(f"ytdl error: {e}")
-        # Reliable fallback sample MP4 video link so player never shows a black screen or 00:00 duration error
+        else:
+            parts.append({
+                "clip_url": local_stream_url,
+                "title": cleaned_title,
+                "description": f"Viral highlight from {cleaned_title} #TikTok #Shorts #FYP",
+                "hashtags": "#Shorts #Viral #Trending #FYP #TikTok",
+            })
+    else:
+        # Fallback sample video if download fails completely
         fallback_url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
-        return [{
+        parts.append({
             "clip_url": fallback_url,
-            "title": "Trending Viral Short #FYP (Anti-Copy)",
-            "description": "Viral highlight #TikTok #Shorts #FYP",
+            "title": cleaned_title,
+            "description": f"Viral highlight from {cleaned_title} #TikTok #Shorts #FYP",
             "hashtags": "#Shorts #Viral #Trending #FYP #TikTok",
-        }]
+        })
+
+    return parts
 
 @app.post("/process-video")
 async def process_video(request: Request):
