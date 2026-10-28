@@ -53,6 +53,7 @@ def ensure_ffmpeg():
     url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
     
     try:
+        logger.info("Downloading static FFmpeg binary...")
         urllib.request.urlretrieve(url, tar_path)
         with tarfile.open(tar_path, "r:xz") as tar:
             for member in tar.getmembers():
@@ -65,6 +66,7 @@ def ensure_ffmpeg():
             if os.path.exists(fp):
                 os.chmod(fp, 0o755)
         if os.path.isfile(FFMPEG_BIN):
+            logger.info("FFmpeg successfully set up locally!")
             return FFMPEG_BIN
     except Exception as e:
         logger.error(f"Failed to auto-download ffmpeg: {e}")
@@ -280,12 +282,12 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[ext=mp4]/best",
+        "format": "best[height<=360][ext=mp4]/best[height<=360]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 20,
+        "socket_timeout": 15,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
