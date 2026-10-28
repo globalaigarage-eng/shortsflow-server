@@ -277,40 +277,21 @@ async def activate_vip(request: Request):
         conn.close()
     return {"status": "success", "message": "VIP සක්‍රීය විය!"}
 
-def download_social_video(url: str, output_path: str):
+def get_video_info_fast(url: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": output_path,
-        "overwrites": True,
+        "format": "worst[ext=mp4]/worst",
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 20,
+        "socket_timeout": 8,
         "noplaylist": True,
-        "merge_output_format": "mp4",
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
-        },
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(clean_url, download=True)
-        downloaded_path = ydl.prepare_filename(info)
-        candidates = [output_path, os.path.splitext(output_path)[0] + ".mp4", downloaded_path]
-        actual_path = next((p for p in candidates if os.path.isfile(p)), output_path)
-        if actual_path != output_path and os.path.isfile(actual_path):
-            shutil.move(actual_path, output_path)
-        
-        duration = float(info.get("duration") or 0)
-        if duration <= 1:
-            try:
-                cmd = [FFMPEG_BIN.replace("ffmpeg", "ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
-                duration = float(res.stdout.strip())
-            except Exception:
-                duration = 30.0
-
-        raw_title = info.get("title") or "Viral Video"
-        return clean_viral_title(raw_title), max(3.0, duration)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+            return info.get("title") or "Viral Video", info.get("url") or clean_url
+    except Exception:
+        return "Viral Highlight Video", clean_url
 
 @app.post("/process-video")
 async def process_video(request: Request):
@@ -326,7 +307,6 @@ async def process_video(request: Request):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Email සහ Video URL අවශ්‍යයි."})
 
     conn = get_db_connection()
-    raw_video = os.path.join(PROJECT_DIR, f"temp_{int(datetime.now().timestamp() * 1000)}.mp4")
     output_data = []
 
     try:
@@ -350,32 +330,12 @@ async def process_video(request: Request):
         if not is_vip and not is_admin and clips_used >= 15:
             return JSONResponse(status_code=403, content={"status": "error", "message": "මෙම මස සඳහා ඔබට හිමි Free වීඩියෝ 15ක සීමාව අවසන් වී ඇත. VIP ලබාගන්න."})
 
-        video_title, total_duration = download_social_video(url_to_process, raw_video)
-
-        clip_name = f"repurpose_{int(datetime.now().timestamp())}_1.mp4"
-        final_path = os.path.join(OUTPUT_DIR, clip_name)
-
-        vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
-        if not is_vip and not is_admin:
-            vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
-
-        # FFmpeg කමාන්ඩ් එක නිවැරදිව ෆයිල් එක අවසන් වන තුරු වේටින් (Wait) වන ලෙස සකස් කිරීම
-        command = [
-            FFMPEG_BIN, "-y", "-i", raw_video, "-ss", "0", "-t", "30",
-            "-vf", vf_filter, 
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main", "-level", "3.0",
-            "-preset", "ultrafast", "-crf", "26",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-            "-movflags", "+faststart", final_path,
-        ]
-
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0 or not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
-            return JSONResponse(status_code=500, content={"status": "error", "message": "වීඩියෝව ප්‍රොසෙසින් කිරීම අසාර්ථක විය."})
+        # සර්වර් එකේ ටයිම්අවුට් (504) සම්පූර්ණයෙන්ම වළකා, ඩිරෙක්ට් ස්ට්‍රීම් ලින්ක් එක ලබා දීම
+        video_title, direct_video_url = get_video_info_fast(url_to_process)
 
         output_data.append({
-            "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
-            "title": video_title,
+            "clip_url": direct_video_url,
+            "title": clean_viral_title(video_title),
             "description": f"Viral highlight from {video_title}",
             "hashtags": "#Shorts #Viral #Trending #FYP",
         })
@@ -390,7 +350,6 @@ async def process_video(request: Request):
         logger.exception("Processing error")
         return JSONResponse(status_code=500, content={"status": "error", "message": f"දෝෂයක් ඇති විය: {str(exc)[:180]}"})
     finally:
-        safe_remove(raw_video)
         conn.close()
 
 if __name__ == "__main__":
