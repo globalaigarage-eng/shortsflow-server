@@ -1,17 +1,11 @@
 import os
 import re
 import sqlite3
-import subprocess
-import shutil
-import json
-import math
 import logging
-import urllib.request
-import tarfile
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import yt_dlp
@@ -35,56 +29,11 @@ DB_PATH = os.environ.get(
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
 
-LOCAL_FFMPEG_DIR = os.path.join(PROJECT_DIR, "ffmpeg_bin")
-FFMPEG_BIN = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg")
-
-def ensure_ffmpeg():
-    global FFMPEG_BIN
-    if os.path.isfile(FFMPEG_BIN) and os.access(FFMPEG_BIN, os.X_OK):
-        return FFMPEG_BIN
-    
-    sys_ffmpeg = shutil.which("ffmpeg")
-    if sys_ffmpeg:
-        FFMPEG_BIN = sys_ffmpeg
-        return FFMPEG_BIN
-
-    os.makedirs(LOCAL_FFMPEG_DIR, exist_ok=True)
-    tar_path = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg.tar.xz")
-    url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-    
-    try:
-        urllib.request.urlretrieve(url, tar_path)
-        with tarfile.open(tar_path, "r:xz") as tar:
-            for member in tar.getmembers():
-                if member.name.endswith("ffmpeg") or member.name.endswith("ffprobe"):
-                    member.name = os.path.basename(member.name)
-                    tar.extract(member, LOCAL_FFMPEG_DIR)
-        os.remove(tar_path)
-        for f in ["ffmpeg", "ffprobe"]:
-            fp = os.path.join(LOCAL_FFMPEG_DIR, f)
-            if os.path.exists(fp):
-                os.chmod(fp, 0o755)
-        if os.path.isfile(FFMPEG_BIN):
-            return FFMPEG_BIN
-    except Exception as e:
-        logger.error(f"Failed to auto-download ffmpeg: {e}")
-    
-    return "ffmpeg"
-
-ensure_ffmpeg()
-
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().casefold()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "@Anushka*malshan2005")
 
 def normalize_email(email: Any) -> str:
     return str(email or "").strip().casefold()
-
-def safe_remove(path: str | None) -> None:
-    if path and os.path.isfile(path):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -106,14 +55,13 @@ def get_first_string(data: dict, *keys: str) -> str:
     return ""
 
 def clean_viral_title(title: str) -> str:
-    if not title:
-        return "Viral Highlight Video"
+    if not title or title == "Viral Video":
+        return "Trending TikTok Viral Short #FYP"
     cleaned = re.sub(r'[\d,.]+[KM]?\s*(views?|likes?|shares?|reactions?|comments?).*?[\|–\-—]', '', title, flags=re.IGNORECASE)
-    cleaned = re.sub(r'[\d,.]+[KM]?\s*(views?|likes?|shares?|reactions?|comments?)', '', cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" |–—•·")
     if not cleaned:
-        cleaned = title[:40]
-    return cleaned.strip()
+        return "Trending TikTok Viral Short #FYP"
+    return cleaned[:60]
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH) or PROJECT_DIR, exist_ok=True)
@@ -155,7 +103,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ffmpeg_available": os.path.isfile(FFMPEG_BIN)}
+    return {"status": "ok"}
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
@@ -277,21 +225,32 @@ async def activate_vip(request: Request):
         conn.close()
     return {"status": "success", "message": "VIP සක්‍රීය විය!"}
 
-def get_video_info_fast(url: str):
+def get_direct_video_stream(url: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "worst[ext=mp4]/worst",
+        "format": "best[ext=mp4]/best",
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 8,
+        "socket_timeout": 10,
         "noplaylist": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
+        },
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=False)
-            return info.get("title") or "Viral Video", info.get("url") or clean_url
-    except Exception:
-        return "Viral Highlight Video", clean_url
+            info = yd_info = ydl.extract_info(clean_url, download=False)
+            title = yd_info.get("title") or "Viral TikTok Short"
+            v_url = yd_info.get("url")
+            if not v_url and "formats" in yd_info:
+                for f in yd_info["formats"]:
+                    if f.get("ext") == "mp4" and f.get("url"):
+                        v_url = f.get("url")
+                        break
+            return clean_viral_title(title), v_url or clean_url
+    except Exception as e:
+        logger.error(f"ytdl error: {e}")
+        return "Trending TikTok Viral Short #FYP", clean_url
 
 @app.post("/process-video")
 async def process_video(request: Request):
@@ -330,14 +289,13 @@ async def process_video(request: Request):
         if not is_vip and not is_admin and clips_used >= 15:
             return JSONResponse(status_code=403, content={"status": "error", "message": "මෙම මස සඳහා ඔබට හිමි Free වීඩියෝ 15ක සීමාව අවසන් වී ඇත. VIP ලබාගන්න."})
 
-        # සර්වර් එකේ ටයිම්අවුට් (504) සම්පූර්ණයෙන්ම වළකා, ඩිරෙක්ට් ස්ට්‍රීම් ලින්ක් එක ලබා දීම
-        video_title, direct_video_url = get_video_info_fast(url_to_process)
+        video_title, direct_stream_url = get_direct_video_stream(url_to_process)
 
         output_data.append({
-            "clip_url": direct_video_url,
-            "title": clean_viral_title(video_title),
-            "description": f"Viral highlight from {video_title}",
-            "hashtags": "#Shorts #Viral #Trending #FYP",
+            "clip_url": direct_stream_url,
+            "title": video_title,
+            "description": f"Viral highlight from {video_title} #TikTok #Shorts #FYP",
+            "hashtags": "#Shorts #Viral #Trending #FYP #TikTok",
         })
 
         if not is_vip and not is_admin:
