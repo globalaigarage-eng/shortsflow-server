@@ -53,7 +53,6 @@ def ensure_ffmpeg():
     url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
     
     try:
-        logger.info("Downloading static FFmpeg binary...")
         urllib.request.urlretrieve(url, tar_path)
         with tarfile.open(tar_path, "r:xz") as tar:
             for member in tar.getmembers():
@@ -66,7 +65,6 @@ def ensure_ffmpeg():
             if os.path.exists(fp):
                 os.chmod(fp, 0o755)
         if os.path.isfile(FFMPEG_BIN):
-            logger.info("FFmpeg successfully set up locally!")
             return FFMPEG_BIN
     except Exception as e:
         logger.error(f"Failed to auto-download ffmpeg: {e}")
@@ -282,12 +280,12 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[height<=360][ext=mp4]/best[height<=360]/best",
+        "format": "best[ext=mp4]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 15,
+        "socket_timeout": 20,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -361,16 +359,19 @@ async def process_video(request: Request):
         if not is_vip and not is_admin:
             vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
 
+        # FFmpeg කමාන්ඩ් එක නිවැරදිව ෆයිල් එක අවසන් වන තුරු වේටින් (Wait) වන ලෙස සකස් කිරීම
         command = [
-            FFMPEG_BIN, "-y", "-i", raw_video, "-t", "30",
+            FFMPEG_BIN, "-y", "-i", raw_video, "-ss", "0", "-t", "30",
             "-vf", vf_filter, 
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main", "-level", "3.0",
-            "-preset", "ultrafast", "-crf", "28",
+            "-preset", "ultrafast", "-crf", "26",
             "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
             "-movflags", "+faststart", final_path,
         ]
 
-        subprocess.run(command, check=True, timeout=120, capture_output=True, text=True)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0 or not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
+            return JSONResponse(status_code=500, content={"status": "error", "message": "වීඩියෝව ප්‍රොසෙසින් කිරීම අසාර්ථක විය."})
 
         output_data.append({
             "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
