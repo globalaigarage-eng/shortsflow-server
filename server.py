@@ -355,21 +355,17 @@ async def process_video(request: Request):
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        if not is_vip and not is_admin and total_duration > 600:
-            return JSONResponse(status_code=403, content={"status": "error", "message": "Free Plan එකේ උපරිම විනාඩි 10 ක වීඩියෝ පමණි."})
+        # Free ප්ලෑන් එක සඳහා උපරිම කාලය තත්පර 30 ලෙස දැඩිව සීමා කිරීම
+        if not is_vip and not is_admin and total_duration > 30:
+            return JSONResponse(status_code=403, content={"status": "error", "message": "Free Plan එකේ උපරිම තත්පර 30 ක වීඩියෝ පමණි. වැඩිදුර සඳහා VIP ලබාගන්න."})
 
-        part_duration = 180
-        total_parts = max(1, math.ceil(total_duration / part_duration))
-        if not is_vip and not is_admin and total_parts > 4:
-            total_parts = 4
+        # තත්පර 30ට අඩු හෝ සමාන වීඩියෝව එකම කොටසක් ලෙස සකස් කිරීම
+        part_duration = 30
+        total_parts = 1
 
         for i in range(total_parts):
-            start_sec = i * part_duration
-            if start_sec >= total_duration:
-                break
-            current_clip_len = min(part_duration, total_duration - start_sec)
-            if current_clip_len <= 2:
-                break
+            start_sec = 0
+            current_clip_len = min(30.0, total_duration)
 
             clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
             final_path = os.path.join(OUTPUT_DIR, clip_name)
@@ -390,8 +386,8 @@ async def process_video(request: Request):
 
             output_data.append({
                 "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
-                "title": f"{video_title} (Part {i+1})" if total_parts > 1 else video_title,
-                "description": f"Viral highlight part {i+1} from {video_title}",
+                "title": video_title,
+                "description": f"Viral highlight from {video_title}",
                 "hashtags": "#Shorts #Viral #Trending #FYP",
             })
 
