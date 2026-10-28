@@ -35,7 +35,6 @@ DB_PATH = os.environ.get(
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.abspath(os.path.join(PROJECT_DIR, DB_PATH))
 
-# ස්වයංක්‍රීයව FFmpeg බිනරි එක සර්වර් එකට ලබා ගැනීම
 LOCAL_FFMPEG_DIR = os.path.join(PROJECT_DIR, "ffmpeg_bin")
 FFMPEG_BIN = os.path.join(LOCAL_FFMPEG_DIR, "ffmpeg")
 
@@ -283,12 +282,12 @@ async def activate_vip(request: Request):
 def download_social_video(url: str, output_path: str):
     clean_url = (url or "").strip()
     ydl_opts = {
-        "format": "best[height<=360][ext=mp4]/best[height<=360]/best",
+        "format": "best[ext=mp4]/best",
         "outtmpl": output_path,
         "overwrites": True,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 15,
+        "socket_timeout": 20,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "http_headers": {
@@ -355,41 +354,35 @@ async def process_video(request: Request):
 
         video_title, total_duration = download_social_video(url_to_process, raw_video)
 
-        # Free ප්ලෑන් එක සඳහා උපරිම කාලය තත්පර 30 ලෙස දැඩිව සීමා කිරීම
+        # උපරිම කාලය තත්පර 30 ලෙස සීමා කිරීම
         if not is_vip and not is_admin and total_duration > 30:
-            return JSONResponse(status_code=403, content={"status": "error", "message": "Free Plan එකේ උපරිම තත්පර 30 ක වීඩියෝ පමණි. වැඩිදුර සඳහා VIP ලබාගන්න."})
+            return JSONResponse(status_code=403, content={"status": "error", "message": "Free Plan එකේ උපරිම තත්පර 30 ක වීඩියෝ පමණි."})
 
-        # තත්පර 30ට අඩු හෝ සමාන වීඩියෝව එකම කොටසක් ලෙස සකස් කිරීම
-        part_duration = 30
-        total_parts = 1
+        clip_name = f"repurpose_{int(datetime.now().timestamp())}_1.mp4"
+        final_path = os.path.join(OUTPUT_DIR, clip_name)
 
-        for i in range(total_parts):
-            start_sec = 0
-            current_clip_len = min(30.0, total_duration)
+        vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
+        if not is_vip and not is_admin:
+            vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
 
-            clip_name = f"repurpose_{int(datetime.now().timestamp())}_{i + 1}.mp4"
-            final_path = os.path.join(OUTPUT_DIR, clip_name)
+        # නිවැරදි H.264 සහ AAC කෝඩෙක්ස් සමඟ වීඩියෝව සම්පූර්ණයෙන්ම රෙන්ඩර් කිරීම (ಪ್ලේ සහ ඩවුන්ලෝඩ් වීම සඳහා)
+        command = [
+            FFMPEG_BIN, "-y", "-i", raw_video, "-t", "30",
+            "-vf", vf_filter, 
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main", "-level", "3.0",
+            "-preset", "ultrafast", "-crf", "28",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+            "-movflags", "+faststart", final_path,
+        ]
 
-            vf_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
-            if not is_vip and not is_admin:
-                vf_filter += ",drawtext=text='ShortsFlow AI':x=w-tw-25:y=h-th-40:fontsize=22:fontcolor=white@0.55"
+        subprocess.run(command, check=True, timeout=120, capture_output=True, text=True)
 
-            command = [
-                FFMPEG_BIN, "-y", "-ss", str(start_sec), "-i", raw_video, "-t", str(int(current_clip_len)),
-                "-vf", vf_filter, "-c:v", "libx264", "-crf", "32",
-                "-preset", "ultrafast", "-threads", "4",
-                "-c:a", "aac", "-b:a", "96k",
-                "-movflags", "+faststart", final_path,
-            ]
-
-            subprocess.run(command, check=True, timeout=300, capture_output=True, text=True)
-
-            output_data.append({
-                "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
-                "title": video_title,
-                "description": f"Viral highlight from {video_title}",
-                "hashtags": "#Shorts #Viral #Trending #FYP",
-            })
+        output_data.append({
+            "clip_url": f"{PUBLIC_BASE_URL}/output/{clip_name}",
+            "title": video_title,
+            "description": f"Viral highlight from {video_title}",
+            "hashtags": "#Shorts #Viral #Trending #FYP",
+        })
 
         if not is_vip and not is_admin:
             cursor.execute("UPDATE users SET monthly_clips_used = monthly_clips_used + 1 WHERE LOWER(TRIM(email)) = ?", (user_email,))
