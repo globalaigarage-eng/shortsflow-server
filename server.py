@@ -38,13 +38,13 @@ for directory in (DATA_DIR, OUTPUT_DIR, TEMP_DIR, DB_PATH.parent):
     directory.mkdir(parents=True, exist_ok=True)
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().casefold()
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "anushkamalshan666@gmail.com").strip().casefold()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "@Anushka*malshan2005")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 FREE_MONTHLY_JOBS = int(os.getenv("FREE_MONTHLY_JOBS", "15"))
 FREE_MAX_DURATION_SECONDS = int(os.getenv("FREE_MAX_DURATION_SECONDS", "600"))
-PART_DURATION_SECONDS = int(os.getenv("PART_DURATION_SECONDS", "180"))
+PART_DURATION_SECONDS = int(os.getenv("PART_DURATION_SECONDS", "30"))  # සකස් කළේ තත්පර 30 ට
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "1")))
 MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "1500"))
 JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", "3"))
@@ -52,14 +52,12 @@ PORT = int(os.getenv("PORT", "8000"))
 
 SUPPORTED_HOSTS = (
     "tiktok.com", "facebook.com", "fb.watch", "instagram.com",
-    "x.com", "twitter.com", "pinterest.com", "pin.it"
+    "x.com", "twitter.com", "pinterest.com", "pin.it", "youtube.com", "youtu.be"
 )
 
 app = FastAPI(title=APP_NAME, version="2.0.0")
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 
-# Runtime-only OTP store. For production, connect an email provider and use a persistent,
-# expiring OTP store. This demo intentionally does not expose OTPs in API responses.
 otp_storage: dict[str, dict[str, Any]] = {}
 worker_task = None
 worker_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
@@ -115,7 +113,6 @@ def init_db():
             FOREIGN KEY(email) REFERENCES users(email)
         )
         """)
-        # Create/upgrade a legacy database with the original plaintext password column.
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "password_hash" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
@@ -127,7 +124,6 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN last_reset_month TEXT")
         if "device_id" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
-        # Migrate the user's legacy plaintext password column, if present.
         if "password" in columns:
             rows = conn.execute("SELECT email, password, password_hash FROM users").fetchall()
             for row in rows:
@@ -152,7 +148,6 @@ def init_db():
                     "UPDATE users SET is_vip=1, vip_expiry='2099-12-31' WHERE lower(trim(email))=?",
                     (ADMIN_EMAIL,)
                 )
-        # Requeue jobs interrupted by a container restart.
         conn.execute("""
             UPDATE jobs SET status='queued', message='Requeued after service restart',
             updated_at=? WHERE status='processing'
@@ -160,7 +155,6 @@ def init_db():
 
 
 def hash_password(password: str) -> str:
-    # PBKDF2 with per-password random salt.
     import hashlib
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 240_000)
@@ -172,7 +166,6 @@ def verify_password(password: str, encoded: str) -> bool:
     try:
         scheme, rounds, salt_hex, digest_hex = encoded.split("$", 3)
         if scheme != "pbkdf2_sha256":
-            # Compatibility with old plaintext records, migrated where possible.
             return secrets.compare_digest(password, encoded)
         calculated = hashlib.pbkdf2_hmac(
             "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(rounds)
@@ -234,22 +227,20 @@ def generate_metadata(video_title: str, part_num: int, total_parts: int, duratio
     suffix = f" | Part {part_num}" if total_parts > 1 else ""
     fallback = {
         "title": clean_title(title, 65) + suffix,
-        "description": f"Watch this {part_num} highlight from {title}. Share your thoughts and follow for more.",
-        "hashtags": "#Shorts #VideoHighlights #Trending"
+        "description": f"Viral highlight part {part_num} from {title} #TikTok #Shorts #FYP",
+        "hashtags": "#Shorts #Viral #Trending #FYP #TikTok"
     }
     if not GEMINI_API_KEY:
         return fallback
 
     prompt = f"""
-You write accurate social-media metadata for a video clip.
-Original video title: {title}
+You write social media metadata for a short video clip.
+Original title: {title}
 Clip number: {part_num} of {total_parts}
-Clip duration in seconds: {duration}
 Return ONLY valid JSON with exactly these string keys:
-"title" (catchy, accurate, max 80 characters; include Part {part_num} if there are multiple clips),
-"description" (1-2 engaging sentences, do not invent facts not present in the title),
-"hashtags" (5-8 relevant hashtags, space-separated).
-Do not claim the video is copyright-free, do not impersonate anyone, and do not use misleading claims.
+"title" (catchy, max 80 characters),
+"description" (1-2 engaging sentences with hashtags),
+"hashtags" (#Shorts #Viral #Trending #FYP #TikTok).
 """
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     try:
@@ -283,7 +274,7 @@ def run_command(args: list[str], timeout: int):
 def download_video(url: str, job_id: str) -> tuple[Path, str, int]:
     template = str(TEMP_DIR / f"{job_id}.%(ext)s")
     opts = {
-        "format": "bestvideo*+bestaudio/best",
+        "format": "bestvideo*+bestaudio/best/best",
         "outtmpl": template,
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -303,7 +294,7 @@ def download_video(url: str, job_id: str) -> tuple[Path, str, int]:
         info = ydl.extract_info(url, download=True)
         if not info:
             raise RuntimeError("The platform did not return video information.")
-        title = clean_title(info.get("title") or "Video Highlight", 140)
+        title = clean_title(info.get("title") or "Viral TikTok Short", 140)
         duration = int(info.get("duration") or 0)
         prepared = Path(ydl.prepare_filename(info))
     candidates = [prepared, prepared.with_suffix(".mp4"), prepared.with_suffix(".mkv"),
@@ -314,7 +305,6 @@ def download_video(url: str, job_id: str) -> tuple[Path, str, int]:
         found = next((p for p in matches if p.is_file() and p.suffix not in (".part", ".ytdl")), None)
     if not found or not found.exists():
         raise RuntimeError("Downloaded video file could not be found.")
-    # Trust ffprobe for actual duration where possible.
     try:
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -327,7 +317,7 @@ def download_video(url: str, job_id: str) -> tuple[Path, str, int]:
     except Exception:
         pass
     if duration <= 0:
-        raise RuntimeError("Could not determine the video duration.")
+        duration = 30
     return found, title, duration
 
 
@@ -342,10 +332,8 @@ def split_video(source: Path, job_id: str, title: str, duration: int) -> list[di
         output_name = f"{job_id}_part_{index + 1:03d}.mp4"
         output_path = OUTPUT_DIR / output_name
         update_job(job_id, progress=min(85, 20 + int(65 * index / max(total_parts, 1))),
-                   message=f"Creating clip {index + 1} of {total_parts}")
-        # Re-encode for reliable segment boundaries and broadly compatible MP4 output.
-        # Vertical crop is intentionally not forced: preserving source framing avoids
-        # cutting off content. App can add an optional 9:16 rendering mode later.
+                   message=f"Creating anti-copyright part {index + 1} of {total_parts}")
+        
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-ss", str(start), "-i", str(source), "-t", str(clip_duration),
@@ -357,16 +345,18 @@ def split_video(source: Path, job_id: str, title: str, duration: int) -> list[di
         ]
         try:
             run_command(command, timeout=max(180, clip_duration * 8))
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"FFmpeg timed out while creating clip {index + 1}. Try a smaller video or a larger Koyeb instance.") from exc
-        except subprocess.CalledProcessError as exc:
-            details = (exc.stderr or exc.stdout or str(exc))[-1200:]
-            raise RuntimeError(f"FFmpeg failed on clip {index + 1}: {details}") from exc
+        except Exception as exc:
+            logger.warning("FFmpeg re-encoding failed, attempting fallback copy: %s", exc)
+            fallback_cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", str(start), "-i", str(source), "-t", str(clip_duration),
+                "-c", "copy", str(output_path)
+            ]
+            run_command(fallback_cmd, timeout=60)
+
         meta = generate_metadata(title, index + 1, total_parts, clip_duration)
         results.append({
             "part": index + 1,
-            "start_seconds": start,
-            "duration_seconds": clip_duration,
             "clip_url": public_file_url(output_name),
             "title": meta["title"],
             "description": meta["description"],
@@ -397,11 +387,7 @@ def process_job(job_id: str):
     try:
         update_job(job_id, status="processing", progress=5, message="Downloading video")
         source_path, title, duration = download_video(url, job_id)
-        if not is_vip and duration > FREE_MAX_DURATION_SECONDS:
-            raise RuntimeError(
-                f"Free plan videos are limited to {FREE_MAX_DURATION_SECONDS // 60} minutes. VIP is required for longer videos."
-            )
-        update_job(job_id, progress=15, message="Preparing video clips")
+        update_job(job_id, progress=15, message="Processing Anti-Copyright Parts")
         results = split_video(source_path, job_id, title, duration)
         update_job(job_id, status="completed", progress=100, message="Completed",
                    results_json=json.dumps(results, ensure_ascii=False), error=None)
@@ -428,7 +414,6 @@ async def worker_loop():
                     ).fetchone()
                     if row:
                         job_id = row["job_id"]
-                        # Mark as processing before leaving the database transaction.
                         conn.execute(
                             "UPDATE jobs SET status='processing', message='Starting', updated_at=? WHERE job_id=? AND status='queued'",
                             (utcnow().isoformat(), job_id)
@@ -494,8 +479,6 @@ async def register(request: Request):
     device_id = str(data.get("device_id") or "UNKNOWN")[:200]
     if not email or "@" not in email or not password:
         raise HTTPException(status_code=400, detail="Valid email and password are required.")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must contain at least 8 characters.")
     with db_connect() as conn:
         try:
             conn.execute("""
@@ -505,7 +488,7 @@ async def register(request: Request):
             """, (email, hash_password(password), current_month(), device_id, utcnow().isoformat()))
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="This email is already registered.")
-    return {"status": "success", "message": "Account created."}
+    return {"status": "success", "message": "ගිණුම සාදන ලදී!"}
 
 
 @app.post("/auth/login")
@@ -518,7 +501,7 @@ async def login(request: Request):
     password = str(data.get("password") or "")
     user = get_user(email)
     if not user or not user["password_hash"] or not verify_password(password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+        raise HTTPException(status_code=401, detail="Email හෝ Password වැරදියි.")
     month = current_month()
     with db_connect() as conn:
         if user["last_reset_month"] != month:
@@ -543,30 +526,6 @@ async def login(request: Request):
     }
 
 
-@app.post("/auth/forgot-password")
-async def forgot_password(request: Request):
-    # Configure a real email provider before enabling password recovery in production.
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
-    email = normalize_email(data.get("email"))
-    if not email or not get_user(email):
-        # Avoid exposing whether an account exists.
-        return {"status": "success", "message": "If the account exists, password recovery instructions will be sent."}
-    otp = f"{secrets.randbelow(1_000_000):06d}"
-    otp_storage[email] = {"otp": otp, "expires": time.time() + 600}
-    # OTP is not returned to the client and no email is sent by this template.
-    # Add SMTP/provider delivery before using this endpoint for real recovery.
-    logger.warning("Password recovery requested for %s; email delivery is not configured.", email)
-    return {"status": "error", "message": "Password recovery email is not configured. Contact the administrator."}
-
-
-@app.post("/auth/reset-password")
-async def reset_password(request: Request):
-    raise HTTPException(status_code=501, detail="Password reset is disabled until a verified email delivery provider is configured.")
-
-
 @app.post("/admin/activate-vip")
 async def activate_vip(request: Request, x_admin_password: str | None = Header(default=None)):
     if not ADMIN_EMAIL or not ADMIN_PASSWORD or not x_admin_password:
@@ -585,7 +544,7 @@ async def activate_vip(request: Request, x_admin_password: str | None = Header(d
         cur = conn.execute("UPDATE users SET is_vip=1, vip_expiry=? WHERE email=?", (expiry, target_email))
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="User not found.")
-    return {"status": "success", "message": f"VIP activated for 30 days.", "vip_expiry": expiry}
+    return {"status": "success", "message": "VIP සක්‍රීය විය!", "vip_expiry": expiry}
 
 
 @app.post("/process-video")
@@ -597,23 +556,16 @@ async def process_video(request: Request):
     email = normalize_email(data.get("email") or data.get("user_email"))
     url = str(data.get("video_url") or data.get("url") or data.get("link") or "").strip()
     if not email or not url:
-        raise HTTPException(status_code=400, detail="Email and video URL are required.")
-    if not valid_source_url(url):
-        raise HTTPException(
-            status_code=400,
-            detail="Supported sources: TikTok, Facebook, Instagram, X/Twitter, and Pinterest. YouTube is not supported."
-        )
+        raise HTTPException(status_code=400, detail="Email සහ Video URL අවශ්‍යයි.")
+    
     user = get_user(email)
     if not user:
-        raise HTTPException(status_code=404, detail="User account not found. Please register or log in.")
+        raise HTTPException(status_code=404, detail="පරිශීලකයා හමු නොවීය.")
+    
     is_admin = bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
     is_vip = bool(user["is_vip"]) or is_admin
-    if is_vip and user["vip_expiry"] and not is_admin:
-        try:
-            is_vip = datetime.strptime(user["vip_expiry"], "%Y-%m-%d").date() >= datetime.now().date()
-        except ValueError:
-            is_vip = False
     month = current_month()
+    
     with db_connect() as conn:
         if user["last_reset_month"] != month:
             conn.execute("UPDATE users SET monthly_jobs_used=0, last_reset_month=? WHERE email=?", (month, email))
@@ -621,8 +573,8 @@ async def process_video(request: Request):
         else:
             used = user["monthly_jobs_used"] or 0
         if not is_vip and used >= FREE_MONTHLY_JOBS:
-            raise HTTPException(status_code=403, detail=f"Monthly free limit of {FREE_MONTHLY_JOBS} jobs reached. VIP required.")
-        # Count one job at submission, preventing parallel requests bypassing the quota.
+            raise HTTPException(status_code=403, detail="මෙම මස සඳහා ඔබට හිමි Free වීඩියෝ සීමාව අවසන් වී ඇත.")
+        
         conn.execute("UPDATE users SET monthly_jobs_used=monthly_jobs_used+1 WHERE email=?", (email,))
         job_id = uuid.uuid4().hex
         now = utcnow().isoformat()
@@ -630,11 +582,12 @@ async def process_video(request: Request):
             INSERT INTO jobs (job_id, email, source_url, status, progress, message, created_at, updated_at)
             VALUES (?, ?, ?, 'queued', 0, 'Queued for processing', ?, ?)
         """, (job_id, email, url, now, now))
+        
     return {
         "status": "success",
         "job_id": job_id,
         "job_status_url": f"/jobs/{job_id}",
-        "message": "Video job queued. Poll the job status endpoint until completed."
+        "message": "වීඩියෝ එක ක්‍රියාවලියට භාජනය වෙමින් පවතී."
     }
 
 
@@ -659,36 +612,8 @@ async def get_job(job_id: str, request: Request):
     return response
 
 
-@app.get("/jobs/{job_id}/results")
-async def get_job_results(job_id: str, request: Request):
-    email = normalize_email(request.query_params.get("email"))
-    if not email:
-        raise HTTPException(status_code=400, detail="Email query parameter is required.")
-    with db_connect() as conn:
-        row = conn.execute("SELECT status, results_json, error FROM jobs WHERE job_id=? AND email=?", (job_id, email)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    if row["status"] != "completed":
-        return {"status": row["status"], "message": "Results are not ready yet.", "error": row["error"]}
-    return {"status": "success", "results": json.loads(row["results_json"] or "[]")}
-
-
-@app.get("/admin/jobs")
-async def admin_jobs(x_admin_password: str | None = Header(default=None), limit: int = 50):
-    if not ADMIN_PASSWORD or not x_admin_password or not secrets.compare_digest(x_admin_password, ADMIN_PASSWORD):
-        raise HTTPException(status_code=403, detail="Admin authentication required.")
-    limit = max(1, min(limit, 200))
-    with db_connect() as conn:
-        rows = conn.execute(
-            "SELECT job_id,email,status,progress,message,error,created_at,updated_at FROM jobs ORDER BY created_at DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
-    return {"jobs": [dict(row) for row in rows]}
-
-
 @app.on_event("startup")
 async def cleanup_old_files():
-    # Remove old output files and completed/failed job records after retention.
     cutoff = utcnow() - timedelta(days=JOB_RETENTION_DAYS)
     try:
         with db_connect() as conn:
