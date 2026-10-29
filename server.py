@@ -1,972 +1,709 @@
 import os
+import re
+import json
 import time
-import math
-import hmac
-import hashlib
+import uuid
+import shutil
 import sqlite3
-import threading
-import urllib.parse
-from decimal import Decimal, ROUND_DOWN
-from datetime import datetime, timezone, timedelta
-from contextlib import contextmanager
-from typing import Optional, Any
+import logging
+import asyncio
+import secrets
+import subprocess
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, EmailStr
+import yt_dlp
+from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-# ============================================================
-# CryptoScope backend. Trading is OFF unless explicitly enabled.
-# Do not use real funds until tested with Binance Futures Testnet.
-# ============================================================
+# ShortsFlow AI backend
+# Use only videos you own or are authorized to download and republish.
+# This app does not remove watermarks or guarantee copyright clearance.
 
-APP_VERSION = "82.2"
-SRI_LANKA_TZ = timezone(timedelta(hours=5, minutes=30))
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "anushkamalshan666@gmail.com").lower().strip()
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("shortsflow")
+
+APP_NAME = "ShortsFlow AI Backend"
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("SHORTSFLOW_DATA_DIR", str(PROJECT_DIR / "data"))).resolve()
+OUTPUT_DIR = Path(os.getenv("SHORTSFLOW_OUTPUT_DIR", str(DATA_DIR / "output"))).resolve()
+TEMP_DIR = Path(os.getenv("SHORTSFLOW_TEMP_DIR", str(DATA_DIR / "tmp"))).resolve()
+DB_PATH = Path(os.getenv("SHORTSFLOW_DB_PATH", str(DATA_DIR / "shortsflow.db"))).resolve()
+for directory in (DATA_DIR, OUTPUT_DIR, TEMP_DIR, DB_PATH.parent):
+    directory.mkdir(parents=True, exist_ok=True)
+
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().casefold()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-DATABASE_PATH = os.getenv("DATABASE_PATH", "cryptoscope.db")
-BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://fapi.binance.com").rstrip("/")
-BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com").rstrip("/")
-LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true"
-BINANCE_RECV_WINDOW = int(os.getenv("BINANCE_RECV_WINDOW", "5000"))
-SCAN_INTERVAL_SECONDS = max(10, int(os.getenv("SCAN_INTERVAL_SECONDS", "30")))
-PRICE_INTERVAL_SECONDS = max(1, int(os.getenv("PRICE_INTERVAL_SECONDS", "15")))
-REQUEST_TIMEOUT = 8
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+FREE_MONTHLY_JOBS = int(os.getenv("FREE_MONTHLY_JOBS", "15"))
+FREE_MAX_DURATION_SECONDS = int(os.getenv("FREE_MAX_DURATION_SECONDS", "600"))
+PART_DURATION_SECONDS = int(os.getenv("PART_DURATION_SECONDS", "180"))
+MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "1")))
+MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "1500"))
+JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", "3"))
+PORT = int(os.getenv("PORT", "8000"))
 
-app = FastAPI(title="CryptoScope 24/7 Autonomous Cloud Engine", version=APP_VERSION)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Set CORS_ORIGINS for production and narrow this list.
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+SUPPORTED_HOSTS = (
+    "tiktok.com", "facebook.com", "fb.watch", "instagram.com",
+    "x.com", "twitter.com", "pinterest.com", "pin.it"
 )
 
-session = requests.Session()
-session.headers.update({"User-Agent": "CryptoScope/82.2"})
-STATE_LOCK = threading.RLock()
-ORDER_LOCK = threading.Lock()
+app = FastAPI(title=APP_NAME, version="2.0.0")
+app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 
-GLOBAL_LIVE_PRICES: dict[str, float] = {}
-TICKER_24HR_CACHE: dict[str, dict] = {}
-BINANCE_RULES_MAP: dict[str, dict] = {}
-BINANCE_SYMBOLS: set[str] = set()
-BYBIT_SYMBOLS: set[str] = set()
-EXCHANGE_SYMBOLS: dict[str, dict] = {}
-ACTIVE_SIGNALS_DB: dict[str, dict] = {}
-HISTORY_SIGNALS_DB: list[dict] = []
-CACHED_SCAN_LIST: list[str] = []
-CLOUD_BOT_USERS: dict[str, dict] = {}
-MICRO_SCALP_BOT_USERS: dict[str, dict] = {}
-MICRO_SCALP_SIGNALS_DB: dict[str, dict] = {}
-USERS_DB: dict[str, dict] = {}
-USER_MY_TRADES_DB: dict[str, list[dict]] = {}
-LAST_SIGNAL_BY_SYMBOL: dict[str, str] = {}
-SIGNAL_IDS_TRADED: set[str] = set()
+# Runtime-only OTP store. For production, connect an email provider and use a persistent,
+# expiring OTP store. This demo intentionally does not expose OTPs in API responses.
+otp_storage: dict[str, dict[str, Any]] = {}
+worker_task = None
+worker_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
-# Binance Cooldown & Rate Limit State
-BINANCE_COOLDOWN_UNTIL = 0.0
-BINANCE_COOLDOWN_LOCK = threading.Lock()
-BINANCE_LAST_REQUEST_AT = 0.0
-MIN_BINANCE_REQUEST_GAP = 0.25
 
-def set_binance_cooldown(seconds, reason):
-    global BINANCE_COOLDOWN_UNTIL
-    with BINANCE_COOLDOWN_LOCK:
-        BINANCE_COOLDOWN_UNTIL = max(
-            BINANCE_COOLDOWN_UNTIL,
-            time.time() + seconds
-        )
-    print(
-        f"[Binance cooldown] "
-        f"Requests paused for {seconds}s. Reason: {reason}"
-    )
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
-def now_ts() -> float:
-    return time.time()
 
-def get_current_sl_time() -> str:
-    return datetime.now(SRI_LANKA_TZ).strftime("%Y-%m-%d %I:%M:%S %p")
+def current_month() -> str:
+    return datetime.now().strftime("%Y-%m")
+
+
+def normalize_email(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
 
 def db_connect():
-    conn = sqlite3.connect(DATABASE_PATH, timeout=20, check_same_thread=False)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
-@contextmanager
-def db_cursor():
-    conn = db_connect()
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 def init_db():
-    with db_cursor() as conn:
-        conn.executescript("""
+    with db_connect() as conn:
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            email TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at REAL NOT NULL,
-            is_vip INTEGER NOT NULL DEFAULT 0, vip_until REAL NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS trades (
-            id TEXT PRIMARY KEY, email TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL,
-            entry REAL NOT NULL, qty REAL NOT NULL, margin REAL NOT NULL, leverage INTEGER NOT NULL,
-            tp REAL NOT NULL, sl REAL NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL,
-            closed_at REAL, exit_price REAL, realized_pnl REAL, exchange_order_id TEXT,
-            fees REAL DEFAULT 0, close_reason TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_trades_email_created ON trades(email, created_at DESC);
-        CREATE TABLE IF NOT EXISTS signal_history (
-            id TEXT PRIMARY KEY, symbol TEXT NOT NULL, payload TEXT NOT NULL, created_at REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS bot_settings (
-            email TEXT PRIMARY KEY, api_key TEXT, api_secret TEXT, max_trades INTEGER NOT NULL DEFAULT 1,
-            margin_usdt REAL NOT NULL DEFAULT 5, leverage INTEGER NOT NULL DEFAULT 3,
-            is_running INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS vip_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, admin_email TEXT, target_email TEXT,
-            days INTEGER, created_at REAL
-        );
+            email TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            is_vip INTEGER NOT NULL DEFAULT 0,
+            vip_expiry TEXT,
+            monthly_jobs_used INTEGER NOT NULL DEFAULT 0,
+            last_reset_month TEXT,
+            device_id TEXT,
+            created_at TEXT NOT NULL
+        )
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            job_id TEXT PRIMARY KEY,
+            email TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            message TEXT,
+            results_json TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(email) REFERENCES users(email)
+        )
+        """)
+        # Create/upgrade a legacy database with the original plaintext password column.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "password_hash" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        if "created_at" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+        if "monthly_jobs_used" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN monthly_jobs_used INTEGER NOT NULL DEFAULT 0")
+        if "last_reset_month" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN last_reset_month TEXT")
+        if "device_id" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
+        # Migrate the user's legacy plaintext password column, if present.
+        if "password" in columns:
+            rows = conn.execute("SELECT email, password, password_hash FROM users").fetchall()
+            for row in rows:
+                if not row["password_hash"] and row["password"]:
+                    conn.execute(
+                        "UPDATE users SET password_hash = ? WHERE email = ?",
+                        (hash_password(str(row["password"])), row["email"])
+                    )
+        if ADMIN_EMAIL and ADMIN_PASSWORD:
+            existing = conn.execute(
+                "SELECT email FROM users WHERE lower(trim(email)) = ?", (ADMIN_EMAIL,)
+            ).fetchone()
+            if not existing:
+                conn.execute("""
+                    INSERT INTO users
+                    (email, password_hash, is_vip, vip_expiry, monthly_jobs_used,
+                     last_reset_month, device_id, created_at)
+                    VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE', ?)
+                """, (ADMIN_EMAIL, hash_password(ADMIN_PASSWORD), current_month(), utcnow().isoformat()))
+            else:
+                conn.execute(
+                    "UPDATE users SET is_vip=1, vip_expiry='2099-12-31' WHERE lower(trim(email))=?",
+                    (ADMIN_EMAIL,)
+                )
+        # Requeue jobs interrupted by a container restart.
+        conn.execute("""
+            UPDATE jobs SET status='queued', message='Requeued after service restart',
+            updated_at=? WHERE status='processing'
+        """, (utcnow().isoformat(),))
 
-def password_hash(password: str, salt: Optional[str] = None) -> str:
-    import hashlib as _hashlib
-    import secrets
-    salt = salt or secrets.token_hex(16)
-    digest = _hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 240_000).hex()
-    return f"{salt}${digest}"
 
-def verify_password(password: str, stored: str) -> bool:
+def hash_password(password: str) -> str:
+    # PBKDF2 with per-password random salt.
+    import hashlib
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 240_000)
+    return "pbkdf2_sha256$240000$" + salt.hex() + "$" + digest.hex()
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    import hashlib
     try:
-        salt, digest = stored.split("$", 1)
-        candidate = password_hash(password, salt).split("$", 1)[1]
-        return hmac.compare_digest(candidate, digest)
+        scheme, rounds, salt_hex, digest_hex = encoded.split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            # Compatibility with old plaintext records, migrated where possible.
+            return secrets.compare_digest(password, encoded)
+        calculated = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(rounds)
+        )
+        return secrets.compare_digest(calculated.hex(), digest_hex)
     except Exception:
         return False
 
-def db_user(email: str):
-    with db_cursor() as conn:
-        row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    return dict(row) if row else None
 
-def safe_user_info(user: dict, email: str):
-    current = now_ts()
-    trial_days = max(0, 14 - int((current - user["created_at"]) / 86400))
-    vip_active = bool(user["is_vip"]) and float(user["vip_until"]) > current
-    return {
-        "status": "success", "email": email, "is_admin": email == ADMIN_EMAIL,
-        "is_vip": vip_active, "trial_days_left": 9999 if email == ADMIN_EMAIL else trial_days,
-        "has_full_access": email == ADMIN_EMAIL or vip_active or trial_days > 0
-    }
+init_db()
 
-def normalize_symbol(symbol: str) -> str:
-    s = (symbol or "").upper().strip().replace("/", "").replace(":", "").replace(" ", "")
-    if s.endswith(".P"):
-        s = s[:-2]
-    if s.endswith("USDT"):
-        return s
-    if s.endswith("USDC") or s.endswith("USD"):
-        return s
-    return s + "USDT"
 
-def fmt_price(price: float) -> str:
-    if not math.isfinite(price) or price <= 0:
-        return "0"
-    if price >= 1000: return f"{price:.2f}"
-    if price >= 1: return f"{price:.4f}".rstrip("0").rstrip(".")
-    if price >= 0.01: return f"{price:.6f}".rstrip("0").rstrip(".")
-    if price >= 0.0001: return f"{price:.8f}".rstrip("0").rstrip(".")
-    return f"{price:.10f}".rstrip("0").rstrip(".")
+def get_user(email: str):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM users WHERE lower(trim(email))=?", (normalize_email(email),)
+        ).fetchone()
 
-def floor_to_step(value: float, step: float) -> float:
-    if step <= 0: return value
-    d_value, d_step = Decimal(str(value)), Decimal(str(step))
-    return float((d_value / d_step).to_integral_value(rounding=ROUND_DOWN) * d_step)
 
-def tick_string(price: float, tick: float) -> str:
-    if tick <= 0: return str(price)
-    d_price, d_tick = Decimal(str(price)), Decimal(str(tick))
-    rounded = (d_price / d_tick).to_integral_value(rounding=ROUND_DOWN) * d_tick
-    return format(rounded, "f")
-
-def binance_public(path: str, params: Optional[dict] = None):
-    global BINANCE_LAST_REQUEST_AT
-
-    # Stop sending requests while Binance has restricted access.
-    with BINANCE_COOLDOWN_LOCK:
-        remaining = BINANCE_COOLDOWN_UNTIL - time.time()
-
-    if remaining > 0:
-        raise RuntimeError(
-            f"Binance API cooldown active: {int(remaining)} seconds remaining"
+def update_job(job_id: str, **fields):
+    if not fields:
+        return
+    fields["updated_at"] = utcnow().isoformat()
+    allowed = {"status", "progress", "message", "results_json", "error", "updated_at"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    assignments = ", ".join(f"{key}=?" for key in fields)
+    with db_connect() as conn:
+        conn.execute(
+            f"UPDATE jobs SET {assignments} WHERE job_id=?",
+            [*fields.values(), job_id]
         )
 
-    # Reduce request bursts from multiple workers.
-    with BINANCE_COOLDOWN_LOCK:
-        elapsed = time.time() - BINANCE_LAST_REQUEST_AT
-        wait_time = MIN_BINANCE_REQUEST_GAP - elapsed
 
-        if wait_time > 0:
-            time.sleep(wait_time)
-
-        BINANCE_LAST_REQUEST_AT = time.time()
-
-    response = session.get(
-        BINANCE_BASE_URL + path,
-        params=params,
-        timeout=REQUEST_TIMEOUT
-    )
-
-    # HTTP 418: Binance may have temporarily restricted this IP.
-    # HTTP 429: Request rate limit exceeded.
-    if response.status_code in (418, 429):
-        retry_after = response.headers.get("Retry-After")
-
-        try:
-            cooldown = (
-                max(60, min(int(retry_after), 1800))
-                if retry_after
-                else 300
-            )
-        except (TypeError, ValueError):
-            cooldown = 300
-
-        set_binance_cooldown(
-            cooldown,
-            f"HTTP {response.status_code}"
-        )
-
-        raise RuntimeError(
-            f"Binance HTTP {response.status_code}; "
-            f"requests paused for {cooldown} seconds"
-        )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if isinstance(data, dict) and data.get("code") is not None:
-        if int(data.get("code", 0)) < 0:
-            raise RuntimeError(
-                data.get("msg", "Binance API error")
-            )
-
-    return data
-
-def bybit_public(path: str, params: Optional[dict] = None):
-    r = session.get(BYBIT_BASE_URL + path, params=params, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-    if data.get("retCode", 0) != 0:
-        raise RuntimeError(data.get("retMsg", "Bybit API error"))
-    return data.get("result", {})
-
-def signed_binance_request(method: str, path: str, api_key: str, api_secret: str, params: dict):
-    if not api_key or not api_secret:
-        raise RuntimeError("Binance API credentials are missing")
-    payload = dict(params)
-    payload["timestamp"] = int(time.time() * 1000)
-    payload["recvWindow"] = BINANCE_RECV_WINDOW
-    query = urllib.parse.urlencode(payload)
-    signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-    url = f"{BINANCE_BASE_URL}{path}?{query}&signature={signature}"
-    response = session.request(method, url, headers={"X-MBX-APIKEY": api_key}, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, dict) and data.get("code") is not None and int(data.get("code", 0)) < 0:
-        raise RuntimeError(data.get("msg", "Binance order request failed"))
-    return data
-
-def get_all_tickers():
+def valid_source_url(url: str) -> bool:
     try:
-        rows = binance_public("/fapi/v1/ticker/24hr")
-        if isinstance(rows, list):
-            with STATE_LOCK:
-                for item in rows:
-                    symbol = item.get("symbol")
-                    if not symbol: continue
-                    try:
-                        price = float(item.get("lastPrice", 0))
-                        if price > 0:
-                            GLOBAL_LIVE_PRICES[symbol] = price
-                            TICKER_24HR_CACHE[symbol] = {
-                                "price": price, "high": float(item.get("highPrice", price)),
-                                "low": float(item.get("lowPrice", price)),
-                                "volume": float(item.get("quoteVolume", 0)),
-                                "change": float(item.get("priceChangePercent", 0))
-                            }
-                    except (ValueError, TypeError):
-                        continue
-        return GLOBAL_LIVE_PRICES
-    except Exception as exc:
-        print(f"[price feed] {exc}")
-        return GLOBAL_LIVE_PRICES
-
-def get_single_ticker(symbol: str) -> float:
-    symbol = normalize_symbol(symbol)
-    with STATE_LOCK:
-        cached = GLOBAL_LIVE_PRICES.get(symbol, 0.0)
-    if cached > 0: return cached
-    try:
-        row = binance_public("/fapi/v1/ticker/price", {"symbol": symbol})
-        price = float(row.get("price", 0))
-        if price > 0:
-            with STATE_LOCK: GLOBAL_LIVE_PRICES[symbol] = price
-        return price
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        host = parsed.hostname.casefold()
+        return any(host == domain or host.endswith("." + domain) for domain in SUPPORTED_HOSTS)
     except Exception:
-        return 0.0
+        return False
 
-def refresh_symbols():
-    global CACHED_SCAN_LIST, BINANCE_SYMBOLS, BYBIT_SYMBOLS, EXCHANGE_SYMBOLS, BINANCE_RULES_MAP
-    bn, bb, rules = set(), set(), {}
+
+def public_file_url(filename: str) -> str:
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}/output/{filename}"
+    return f"/output/{filename}"
+
+
+def clean_title(value: str, limit: int = 90) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    value = re.sub(r"[\x00-\x1f]", "", value)
+    return value[:limit] or "Video Highlight"
+
+
+def generate_metadata(video_title: str, part_num: int, total_parts: int, duration: int) -> dict:
+    title = clean_title(video_title, 140)
+    suffix = f" | Part {part_num}" if total_parts > 1 else ""
+    fallback = {
+        "title": clean_title(title, 65) + suffix,
+        "description": f"Watch this {part_num} highlight from {title}. Share your thoughts and follow for more.",
+        "hashtags": "#Shorts #VideoHighlights #Trending"
+    }
+    if not GEMINI_API_KEY:
+        return fallback
+
+    prompt = f"""
+You write accurate social-media metadata for a video clip.
+Original video title: {title}
+Clip number: {part_num} of {total_parts}
+Clip duration in seconds: {duration}
+Return ONLY valid JSON with exactly these string keys:
+"title" (catchy, accurate, max 80 characters; include Part {part_num} if there are multiple clips),
+"description" (1-2 engaging sentences, do not invent facts not present in the title),
+"hashtags" (5-8 relevant hashtags, space-separated).
+Do not claim the video is copyright-free, do not impersonate anyone, and do not use misleading claims.
+"""
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     try:
-        info = binance_public("/fapi/v1/exchangeInfo")
-        for s in info.get("symbols", []):
-            if s.get("status") != "TRADING" or s.get("contractType") != "PERPETUAL": continue
-            if s.get("quoteAsset") != "USDT" or s.get("symbol", "").endswith("_"): continue
-            sym = s["symbol"]
-            bn.add(sym)
-            step, tick, min_qty = 0.001, 0.0001, 0.0
-            for f in s.get("filters", []):
-                if f.get("filterType") == "LOT_SIZE":
-                    step = float(f.get("stepSize", step)); min_qty = float(f.get("minQty", 0))
-                elif f.get("filterType") == "PRICE_FILTER":
-                    tick = float(f.get("tickSize", tick))
-            rules[sym] = {"step_size": step, "tick_size": tick, "min_qty": min_qty}
-    except Exception as exc:
-        print(f"[Binance symbols] {exc}")
-    try:
-        cursor = None
-        for _ in range(20):
-            params = {"category": "linear", "limit": 1000}
-            if cursor: params["cursor"] = cursor
-            result = bybit_public("/v5/market/instruments-info", params)
-            for s in result.get("list", []):
-                if s.get("status") == "Trading" and s.get("quoteCoin") == "USDT" and s.get("contractType") == "LinearPerpetual":
-                    bb.add(s.get("symbol", ""))
-            cursor = result.get("nextPageCursor")
-            if not cursor: break
-    except Exception as exc:
-        print(f"[Bybit symbols] {exc}")
-    with STATE_LOCK:
-        if bn: BINANCE_SYMBOLS = bn
-        if bb: BYBIT_SYMBOLS = bb
-        if rules: BINANCE_RULES_MAP = rules
-        union = BINANCE_SYMBOLS | BYBIT_SYMBOLS
-        EXCHANGE_SYMBOLS = {}
-        for symbol in union:
-            on_bn, on_bb = symbol in BINANCE_SYMBOLS, symbol in BYBIT_SYMBOLS
-            badge = "BINANCE & BYBIT" if on_bn and on_bb else ("BINANCE ONLY" if on_bn else "BYBIT ONLY")
-            EXCHANGE_SYMBOLS[symbol] = {
-                "symbol": symbol, "exchange_badge": badge,
-                "is_binance": on_bn, "is_bybit": on_bb,
-                "tradable_on_binance": on_bn
-            }
-        CACHED_SCAN_LIST = sorted(BINANCE_SYMBOLS)
-    get_all_tickers()
-    print(f"[symbols] Binance={len(BINANCE_SYMBOLS)} Bybit={len(BYBIT_SYMBOLS)} union={len(EXCHANGE_SYMBOLS)}")
-
-def fetch_klines(symbol: str, interval: str, limit: int = 120):
-    rows = binance_public("/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
-    rows = rows[:-1]
-    result = []
-    for k in rows:
-        result.append({
-            "time": int(k[0]), "open": float(k[1]), "high": float(k[2]),
-            "low": float(k[3]), "close": float(k[4]), "volume": float(k[5]),
-            "close_time": int(k[6])
-        })
-    return result
-
-def ema(values: list[float], period: int) -> Optional[float]:
-    if len(values) < period: return None
-    alpha = 2 / (period + 1)
-    out = values[0]
-    for value in values[1:]: out = alpha * value + (1 - alpha) * out
-    return out
-
-def make_signal_id(symbol: str, side: str, candle_time: int) -> str:
-    return f"{symbol}:{side}:{candle_time}"
-
-def generate_instant_smc_setup(symbol: str):
-    symbol = normalize_symbol(symbol)
-    if symbol not in BINANCE_SYMBOLS: return None
-    try:
-        candles_1h = fetch_klines(symbol, "1h", 100)
-        candles_15m = fetch_klines(symbol, "15m", 100)
-        candles_5m = fetch_klines(symbol, "5m", 100)
-        if len(candles_1h) < 55 or len(candles_15m) < 35 or len(candles_5m) < 35: return None
-
-        c1 = [c["close"] for c in candles_1h]
-        ema20, ema50 = ema(c1[-80:], 20), ema(c1[-80:], 50)
-        if ema20 is None or ema50 is None: return None
-        trend = "BULLISH" if c1[-1] > ema20 > ema50 else ("BEARISH" if c1[-1] < ema20 < ema50 else "NEUTRAL")
-        if trend == "NEUTRAL": return None
-
-        m15 = candles_15m
-        recent15 = m15[-21:-1]
-        high15 = max(x["high"] for x in recent15)
-        low15 = min(x["low"] for x in recent15)
-        last15 = m15[-1]
-        swept_low = last15["low"] < low15 and last15["close"] > low15
-        swept_high = last15["high"] > high15 and last15["close"] < high15
-
-        m5 = candles_5m
-        last, prev = m5[-1], m5[-2]
-        local = m5[-13:-2]
-        local_high = max(x["high"] for x in local)
-        local_low = min(x["low"] for x in local)
-        avg_range = sum(x["high"] - x["low"] for x in m5[-20:]) / min(20, len(m5[-20:]))
-        body = abs(last["close"] - last["open"])
-        if avg_range <= 0 or body < avg_range * 0.45: return None
-
-        bullish_break = last["close"] > local_high and last["close"] > last["open"]
-        bearish_break = last["close"] < local_low and last["close"] < last["open"]
-        fvg_bull = m5[-1]["low"] > m5[-3]["high"]
-        fvg_bear = m5[-1]["high"] < m5[-3]["low"]
-
-        side = None
-        if trend == "BULLISH" and swept_low and bullish_break and (fvg_bull or last["close"] > prev["high"]):
-            side = "BUY / LONG"
-            structural_sl = min(last15["low"], min(x["low"] for x in m5[-6:]))
-            entry = last["close"]
-            risk = entry - structural_sl
-            if risk <= 0 or risk / entry > 0.025: return None
-            sl, tp = structural_sl, entry + 2 * risk
-            sweep_level = low15
-        elif trend == "BEARISH" and swept_high and bearish_break and (fvg_bear or last["close"] < prev["low"]):
-            side = "SELL / SHORT"
-            structural_sl = max(last15["high"], max(x["high"] for x in m5[-6:]))
-            entry = last["close"]
-            risk = structural_sl - entry
-            if risk <= 0 or risk / entry > 0.025: return None
-            sl, tp = structural_sl, entry - 2 * risk
-            sweep_level = high15
-        else:
-            return None
-
-        rules = BINANCE_RULES_MAP.get(symbol, {"tick_size": 0.0001})
-        tick = rules["tick_size"]
-        candle_time = last["time"]
-        sid = make_signal_id(symbol, side, candle_time)
-        current = get_single_ticker(symbol) or entry
+        response = requests.post(
+            endpoint,
+            params={"key": GEMINI_API_KEY},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.65, "responseMimeType": "application/json"}
+            },
+            timeout=(5, 25)
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw = payload["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(raw)
         return {
-            "id": sid, "signal_id": sid, "symbol": symbol, "timeframe": "1H / 15M / 5M",
-            "signal": side, "setup": "MTF SMC: Liquidity Sweep + 5M Structure Break",
-            "trend": trend, "price": fmt_price(entry), "entry": fmt_price(entry),
-            "entry_price": fmt_price(entry), "live_price": fmt_price(current),
-            "current_price": fmt_price(current), "mark_price": fmt_price(current),
-            "last_price": fmt_price(current), "realtime_price": fmt_price(current),
-            "take_profit": tick_string(tp, tick), "stop_loss": tick_string(sl, tick),
-            "raw_price": current, "raw_entry": entry, "raw_tp": tp, "raw_sl": sl,
-            "sweep_level": fmt_price(sweep_level), "confidence": None,
-            "grade": "MTF SMC - rule-based", "status": "ACTIVE",
-            "exchange_badge": EXCHANGE_SYMBOLS.get(symbol, {}).get("exchange_badge", "BINANCE ONLY"),
-            "is_binance": True, "is_bybit": symbol in BYBIT_SYMBOLS,
-            "scanned_time": get_current_sl_time(), "created_at": now_ts(),
-            "candle_time": candle_time,
-            "sparkline": [c["close"] for c in m5[-8:]]
+            "title": clean_title(parsed.get("title") or fallback["title"], 100),
+            "description": clean_title(parsed.get("description") or fallback["description"], 500),
+            "hashtags": clean_title(parsed.get("hashtags") or fallback["hashtags"], 300)
         }
     except Exception as exc:
-        print(f"[SMC scan] {symbol}: {exc}")
-        return None
+        logger.warning("Gemini metadata generation failed; using fallback: %s", exc)
+        return fallback
 
-def load_bot_settings():
-    with db_cursor() as conn:
-        rows = conn.execute("SELECT * FROM bot_settings").fetchall()
-        for row in rows:
-            email = row["email"]
-            CLOUD_BOT_USERS[email] = {
-                "api_key": row["api_key"] or "", "api_secret": row["api_secret"] or "",
-                "max_trades": int(row["max_trades"]), "margin_usdt": float(row["margin_usdt"]),
-                "leverage": int(row["leverage"]), "is_running": bool(row["is_running"]),
-                "active_positions": []
-            }
 
-def persist_bot_settings(email: str, data: dict):
-    with db_cursor() as conn:
-        conn.execute("""INSERT INTO bot_settings(email,api_key,api_secret,max_trades,margin_usdt,leverage,is_running)
-        VALUES(?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET api_key=excluded.api_key,
-        api_secret=excluded.api_secret,max_trades=excluded.max_trades,margin_usdt=excluded.margin_usdt,
-        leverage=excluded.leverage,is_running=excluded.is_running""",
-        (email, data.get("api_key", ""), data.get("api_secret", ""), data["max_trades"],
-         data["margin_usdt"], data["leverage"], int(data["is_running"])))
+def run_command(args: list[str], timeout: int):
+    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout)
 
-def persist_trade(email: str, trade: dict):
-    with db_cursor() as conn:
-        conn.execute("""INSERT OR REPLACE INTO trades
-        (id,email,symbol,side,entry,qty,margin,leverage,tp,sl,status,created_at,exchange_order_id)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (trade["id"], email, trade["symbol"], trade["side"], trade["entry"], trade["qty"],
-         trade["margin"], trade["leverage"], trade["tp"], trade["sl"], trade["status"],
-         trade["created_at"], str(trade.get("order_id", ""))))
 
-def read_trades(email: str):
-    with db_cursor() as conn:
-        rows = conn.execute("SELECT * FROM trades WHERE email=? ORDER BY created_at DESC", (email,)).fetchall()
-    return [dict(row) for row in rows]
-
-def place_native_tp_sl(api_key: str, api_secret: str, symbol: str, close_side: str, tp: float, sl: float):
-    tick = BINANCE_RULES_MAP.get(symbol, {}).get("tick_size", 0.0001)
-    tp_s, sl_s = tick_string(tp, tick), tick_string(sl, tick)
-    tp_result = signed_binance_request("POST", "/fapi/v1/order", api_key, api_secret, {
-        "symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-        "stopPrice": tp_s, "closePosition": "true", "workingType": "MARK_PRICE"
-    })
+def download_video(url: str, job_id: str) -> tuple[Path, str, int]:
+    template = str(TEMP_DIR / f"{job_id}.%(ext)s")
+    opts = {
+        "format": "bestvideo*+bestaudio/best",
+        "outtmpl": template,
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "continuedl": True,
+        "overwrites": True,
+        "max_filesize": MAX_DOWNLOAD_MB * 1024 * 1024,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+        }
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if not info:
+            raise RuntimeError("The platform did not return video information.")
+        title = clean_title(info.get("title") or "Video Highlight", 140)
+        duration = int(info.get("duration") or 0)
+        prepared = Path(ydl.prepare_filename(info))
+    candidates = [prepared, prepared.with_suffix(".mp4"), prepared.with_suffix(".mkv"),
+                  prepared.with_suffix(".webm"), prepared.with_suffix(".mov")]
+    found = next((p for p in candidates if p.exists() and p.is_file()), None)
+    if not found:
+        matches = list(TEMP_DIR.glob(f"{job_id}.*"))
+        found = next((p for p in matches if p.is_file() and p.suffix not in (".part", ".ytdl")), None)
+    if not found or not found.exists():
+        raise RuntimeError("Downloaded video file could not be found.")
+    # Trust ffprobe for actual duration where possible.
     try:
-        sl_result = signed_binance_request("POST", "/fapi/v1/order", api_key, api_secret, {
-            "symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-            "stopPrice": sl_s, "closePosition": "true", "workingType": "MARK_PRICE"
-        })
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(found)],
+            capture_output=True, text=True, timeout=20, check=True
+        )
+        actual = float(probe.stdout.strip())
+        if actual > 0:
+            duration = int(actual + 0.5)
     except Exception:
+        pass
+    if duration <= 0:
+        raise RuntimeError("Could not determine the video duration.")
+    return found, title, duration
+
+
+def split_video(source: Path, job_id: str, title: str, duration: int) -> list[dict]:
+    total_parts = (duration + PART_DURATION_SECONDS - 1) // PART_DURATION_SECONDS
+    results = []
+    for index in range(total_parts):
+        start = index * PART_DURATION_SECONDS
+        clip_duration = min(PART_DURATION_SECONDS, duration - start)
+        if clip_duration <= 0:
+            continue
+        output_name = f"{job_id}_part_{index + 1:03d}.mp4"
+        output_path = OUTPUT_DIR / output_name
+        update_job(job_id, progress=min(85, 20 + int(65 * index / max(total_parts, 1))),
+                   message=f"Creating clip {index + 1} of {total_parts}")
+        # Re-encode for reliable segment boundaries and broadly compatible MP4 output.
+        # Vertical crop is intentionally not forced: preserving source framing avoids
+        # cutting off content. App can add an optional 9:16 rendering mode later.
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", str(start), "-i", str(source), "-t", str(clip_duration),
+            "-map", "0:v:0", "-map", "0:a?",
+            "-vf", "scale='min(1080,iw)':-2",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            "-map_metadata", "-1", str(output_path)
+        ]
         try:
-            positions = signed_binance_request(
-                "GET", "/fapi/v2/positionRisk", api_key, api_secret, {"symbol": symbol}
+            run_command(command, timeout=max(180, clip_duration * 8))
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"FFmpeg timed out while creating clip {index + 1}. Try a smaller video or a larger Koyeb instance.") from exc
+        except subprocess.CalledProcessError as exc:
+            details = (exc.stderr or exc.stdout or str(exc))[-1200:]
+            raise RuntimeError(f"FFmpeg failed on clip {index + 1}: {details}") from exc
+        meta = generate_metadata(title, index + 1, total_parts, clip_duration)
+        results.append({
+            "part": index + 1,
+            "start_seconds": start,
+            "duration_seconds": clip_duration,
+            "clip_url": public_file_url(output_name),
+            "title": meta["title"],
+            "description": meta["description"],
+            "hashtags": meta["hashtags"]
+        })
+    return results
+
+
+def process_job(job_id: str):
+    with db_connect() as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if not job:
+            return
+        email, url = job["email"], job["source_url"]
+        user = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    if not user:
+        update_job(job_id, status="failed", error="User account not found.", message="Failed")
+        return
+
+    is_vip = bool(user["is_vip"])
+    if is_vip and user["vip_expiry"]:
+        try:
+            is_vip = datetime.strptime(user["vip_expiry"], "%Y-%m-%d").date() >= datetime.now().date()
+        except ValueError:
+            is_vip = False
+
+    source_path = None
+    try:
+        update_job(job_id, status="processing", progress=5, message="Downloading video")
+        source_path, title, duration = download_video(url, job_id)
+        if not is_vip and duration > FREE_MAX_DURATION_SECONDS:
+            raise RuntimeError(
+                f"Free plan videos are limited to {FREE_MAX_DURATION_SECONDS // 60} minutes. VIP is required for longer videos."
             )
-            position_amount = 0.0
-            for item in positions if isinstance(positions, list) else []:
-                if item.get("symbol") == symbol:
-                    position_amount = float(item.get("positionAmt", 0) or 0)
-                    break
-            if abs(position_amount) > 0:
-                step = BINANCE_RULES_MAP.get(symbol, {}).get("step_size", 0.001)
-                close_qty = floor_to_step(abs(position_amount), step)
-                if close_qty > 0:
-                    emergency_side = "SELL" if position_amount > 0 else "BUY"
-                    signed_binance_request("POST", "/fapi/v1/order", api_key, api_secret, {
-                        "symbol": symbol, "side": emergency_side, "type": "MARKET",
-                        "quantity": tick_string(close_qty, step), "reduceOnly": "true"
-                    })
-        except Exception as close_exc:
-            print(f"[CRITICAL] TP/SL setup failed and emergency close failed for {symbol}: {close_exc}")
-        raise
-    return tp_result, sl_result
+        update_job(job_id, progress=15, message="Preparing video clips")
+        results = split_video(source_path, job_id, title, duration)
+        update_job(job_id, status="completed", progress=100, message="Completed",
+                   results_json=json.dumps(results, ensure_ascii=False), error=None)
+        logger.info("Job %s completed with %s clips", job_id, len(results))
+    except Exception as exc:
+        logger.exception("Job %s failed", job_id)
+        update_job(job_id, status="failed", progress=100, message="Processing failed", error=str(exc)[:1800])
+    finally:
+        for path in TEMP_DIR.glob(f"{job_id}.*"):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
-def execute_binance_trade(email: str, bot: dict, sig: dict):
-    if not LIVE_TRADING_ENABLED:
-        print("[trade skipped] LIVE_TRADING_ENABLED is false")
-        return None
-    symbol = sig["symbol"]
-    if symbol not in BINANCE_SYMBOLS:
-        return None
-    api_key, api_secret = bot.get("api_key", ""), bot.get("api_secret", "")
-    side = "BUY" if "BUY" in sig["signal"].upper() else "SELL"
-    close_side = "SELL" if side == "BUY" else "BUY"
-    margin = float(bot.get("margin_usdt", 5))
-    leverage = max(1, min(25, int(bot.get("leverage", 3))))
-    price = get_single_ticker(symbol)
-    if price <= 0: return None
-    rules = BINANCE_RULES_MAP.get(symbol, {"step_size": 0.001, "tick_size": 0.0001, "min_qty": 0})
-    qty = floor_to_step((margin * leverage) / price, rules["step_size"])
-    if qty < float(rules.get("min_qty", 0)) or qty <= 0 or qty * price < 5:
-        print(f"[trade skipped] {symbol} quantity/notional below exchange minimum")
-        return None
 
-    with ORDER_LOCK:
-        if any(p.get("symbol") == symbol for p in bot.get("active_positions", [])):
-            return None
-        if len(bot.get("active_positions", [])) >= int(bot.get("max_trades", 1)):
-            return None
-        try:
-            signed_binance_request("POST", "/fapi/v1/leverage", api_key, api_secret,
-                                   {"symbol": symbol, "leverage": leverage})
-            order = signed_binance_request("POST", "/fapi/v1/order", api_key, api_secret, {
-                "symbol": symbol, "side": side, "type": "MARKET", "quantity": tick_string(qty, rules["step_size"])
-            })
-            order_id = order.get("orderId")
-            executed_qty = float(order.get("executedQty", qty) or qty)
-            actual_entry = float(order.get("avgPrice", 0) or 0)
-            if actual_entry <= 0:
-                actual_entry = get_single_ticker(symbol) or price
-                try:
-                    detail = signed_binance_request("GET", "/fapi/v1/order", api_key, api_secret,
-                                                    {"symbol": symbol, "orderId": order_id})
-                    actual_entry = float(detail.get("avgPrice", 0) or actual_entry)
-                    executed_qty = float(detail.get("executedQty", executed_qty) or executed_qty)
-                except Exception:
-                    pass
-            tp, sl = float(sig["raw_tp"]), float(sig["raw_sl"])
-            place_native_tp_sl(api_key, api_secret, symbol, close_side, tp, sl)
-            trade = {
-                "id": f"{email}:{symbol}:{order_id}:{int(now_ts())}", "symbol": symbol,
-                "side": sig["signal"], "entry": actual_entry, "entry_price": fmt_price(actual_entry),
-                "tp": tp, "take_profit": fmt_price(tp), "sl": sl, "stop_loss": fmt_price(sl),
-                "qty": executed_qty, "margin": margin, "leverage": leverage, "status": "OPEN",
-                "time": get_current_sl_time(), "created_at": now_ts(), "order_id": order_id
-            }
-            USER_MY_TRADES_DB.setdefault(email, []).insert(0, trade)
-            bot.setdefault("active_positions", []).append(trade)
-            persist_trade(email, trade)
-            return trade
-        except Exception as exc:
-            print(f"[trade error] {symbol}: {exc}")
-            return None
-
-def trigger_instant_order_for_all(sig: dict):
-    sid = sig.get("signal_id") or sig.get("id")
-    if not sid or sid in SIGNAL_IDS_TRADED: return
-    if now_ts() - sig.get("created_at", 0) > 240: return
-    for email, bot in list(CLOUD_BOT_USERS.items()):
-        if not bot.get("is_running") or not bot.get("api_key") or not bot.get("api_secret"): continue
-        if any(p.get("symbol") == sig["symbol"] for p in bot.get("active_positions", [])): continue
-        if len(bot.get("active_positions", [])) >= bot.get("max_trades", 1): continue
-        placed = execute_binance_trade(email, bot, sig)
-        if placed:
-            SIGNAL_IDS_TRADED.add(sid)
-
-def close_trade_record(email: str, pos: dict, price: float, reason: str):
-    trade_id = pos.get("id")
-    pnl = (price - pos["entry"]) * pos["qty"] if "BUY" in pos["side"].upper() else (pos["entry"] - price) * pos["qty"]
-    with db_cursor() as conn:
-        conn.execute("""UPDATE trades SET status=?,closed_at=?,exit_price=?,realized_pnl=?,close_reason=?
-        WHERE id=? AND email=?""", (f"CLOSED ({reason})", now_ts(), price, pnl, reason, trade_id, email))
-    for t in USER_MY_TRADES_DB.get(email, []):
-        if t.get("id") == trade_id:
-            t.update({"status": f"CLOSED ({reason})", "exit_price": fmt_price(price),
-                      "closed_time": get_current_sl_time(), "realized_pnl": round(pnl, 6), "close_reason": reason})
-
-def cloud_bot_autonomous_worker():
+async def worker_loop():
+    logger.info("Background worker started")
     while True:
         try:
-            tickers = dict(GLOBAL_LIVE_PRICES)
-            for email, bot in list(CLOUD_BOT_USERS.items()):
-                if not bot.get("is_running"): continue
-                remaining = []
-                for pos in list(bot.get("active_positions", [])):
-                    price = tickers.get(pos["symbol"], 0) or get_single_ticker(pos["symbol"])
-                    if price <= 0:
-                        remaining.append(pos); continue
-                    long = "BUY" in pos["side"].upper()
-                    reason = "TP HIT" if (price >= pos["tp"] if long else price <= pos["tp"]) else (
-                        "SL HIT" if (price <= pos["sl"] if long else price >= pos["sl"]) else None)
-                    if not reason:
-                        remaining.append(pos); continue
-                    try:
-                        positions = signed_binance_request("GET", "/fapi/v2/positionRisk", bot["api_key"], bot["api_secret"], {"symbol": pos["symbol"]})
-                        amt = 0.0
-                        for item in positions if isinstance(positions, list) else []:
-                            if item.get("symbol") == pos["symbol"]: amt = float(item.get("positionAmt", 0))
-                        if abs(amt) > 0:
-                            close_side = "SELL" if amt > 0 else "BUY"
-                            signed_binance_request("POST", "/fapi/v1/order", bot["api_key"], bot["api_secret"], {
-                                "symbol": pos["symbol"], "side": close_side, "type": "MARKET",
-                                "quantity": tick_string(abs(amt), BINANCE_RULES_MAP.get(pos["symbol"], {}).get("step_size", 0.001)),
-                                "reduceOnly": "true"
-                            })
-                        close_trade_record(email, pos, price, reason)
-                    except Exception as exc:
-                        print(f"[close monitor] {pos['symbol']}: {exc}")
-                        remaining.append(pos)
-                bot["active_positions"] = remaining
-            time.sleep(2)
-        except Exception as exc:
-            print(f"[trade worker] {exc}")
-            time.sleep(2)
+            async with worker_semaphore:
+                with db_connect() as conn:
+                    row = conn.execute(
+                        "SELECT job_id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1"
+                    ).fetchone()
+                    if row:
+                        job_id = row["job_id"]
+                        # Mark as processing before leaving the database transaction.
+                        conn.execute(
+                            "UPDATE jobs SET status='processing', message='Starting', updated_at=? WHERE job_id=? AND status='queued'",
+                            (utcnow().isoformat(), job_id)
+                        )
+                    else:
+                        job_id = None
+                if job_id:
+                    await asyncio.to_thread(process_job, job_id)
+                else:
+                    await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Worker loop error")
+            await asyncio.sleep(3)
 
-def radar_lifecycle_worker():
-    scan_index = 0
-    while True:
-        try:
-            # 1. Active signals update කරගැනීම
-            for symbol, sig in list(ACTIVE_SIGNALS_DB.items()):
-                price = GLOBAL_LIVE_PRICES.get(symbol, 0) or get_single_ticker(symbol)
-                if price <= 0: continue
-                sig.update({"live_price": fmt_price(price), "current_price": fmt_price(price),
-                            "last_price": fmt_price(price), "mark_price": fmt_price(price),
-                            "realtime_price": fmt_price(price), "raw_price": price})
-                long = "BUY" in sig["signal"].upper()
-                reason = "TP HIT (+2R)" if (price >= sig["raw_tp"] if long else price <= sig["raw_tp"]) else (
-                    "SL HIT (-1R)" if (price <= sig["raw_sl"] if long else price >= sig["raw_sl"]) else None)
-                if reason:
-                    sig.update({"status": reason, "closed_time": get_current_sl_time(),
-                                "closed_at": now_ts(), "exit_price": fmt_price(price)})
-                    HISTORY_SIGNALS_DB.insert(0, dict(sig))
-                    with db_cursor() as conn:
-                        import json
-                        conn.execute("INSERT OR REPLACE INTO signal_history(id,symbol,payload,created_at) VALUES(?,?,?,?)",
-                                     (sig["signal_id"], symbol, json.dumps(sig), now_ts()))
-                    del ACTIVE_SIGNALS_DB[symbol]
-
-            # 2. විනාඩියකට කොයින් 2ක් බැගින් (තත්පර 30කට වරක් එකක්) ආරක්ෂිතව ස්කෑන් කිරීම
-            pool = list(CACHED_SCAN_LIST)
-            if pool:
-                symbol = pool[scan_index % len(pool)]
-                scan_index += 1
-                if symbol not in ACTIVE_SIGNALS_DB:
-                    sig = generate_instant_smc_setup(symbol)
-                    if sig and LAST_SIGNAL_BY_SYMBOL.get(symbol) != sig["signal_id"]:
-                        LAST_SIGNAL_BY_SYMBOL[symbol] = sig["signal_id"]
-                        ACTIVE_SIGNALS_DB[symbol] = sig
-                        trigger_instant_order_for_all(sig)
-
-            time.sleep(30)
-
-        except Exception as exc:
-            print(f"[radar worker] {exc}")
-            time.sleep(30)
-
-def price_worker():
-    while True:
-        try:
-            get_all_tickers()
-        except Exception as exc:
-            print(f"[Price worker] {exc}")
-        time.sleep(15)
 
 @app.on_event("startup")
-def startup():
-    init_db()
-    load_bot_settings()
-    with db_cursor() as conn:
-        for row in conn.execute("SELECT * FROM users").fetchall():
-            USERS_DB[row["email"]] = dict(row)
-        for row in conn.execute("SELECT * FROM trades WHERE status='OPEN' ORDER BY created_at DESC").fetchall():
-            trade = dict(row)
-            email = trade["email"]
-            USER_MY_TRADES_DB.setdefault(email, []).append({
-                **trade, "entry_price": fmt_price(trade["entry"]), "take_profit": fmt_price(trade["tp"]),
-                "stop_loss": fmt_price(trade["sl"]), "time": datetime.fromtimestamp(trade["created_at"], SRI_LANKA_TZ).strftime("%Y-%m-%d %I:%M:%S %p")
-            })
-    refresh_symbols()
-    threading.Thread(target=price_worker, daemon=True).start()
-    threading.Thread(target=radar_lifecycle_worker, daemon=True).start()
-    threading.Thread(target=cloud_bot_autonomous_worker, daemon=True).start()
+async def startup_event():
+    global worker_task
+    worker_task = asyncio.create_task(worker_loop())
 
-class RegisterModel(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
 
-class LoginModel(BaseModel):
-    email: EmailStr
-    password: str
+@app.on_event("shutdown")
+async def shutdown_event():
+    global worker_task
+    if worker_task:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
-class AdminGrantVipModel(BaseModel):
-    admin_email: EmailStr
-    admin_password: str
-    target_email: EmailStr
-    days: int = Field(ge=1, le=3650)
-
-class CloudBotConfigModel(BaseModel):
-    email: EmailStr
-    api_key: str = ""
-    api_secret: str = ""
-    max_trades: int = Field(default=1, ge=1, le=20)
-    margin_usdt: float = Field(default=5, ge=2, le=100000)
-    leverage: int = Field(default=3, ge=1, le=25)
-    is_running: bool = False
 
 @app.get("/")
 def root():
-    return {"status": "online", "version": APP_VERSION, "live_trading_enabled": LIVE_TRADING_ENABLED,
-            "active_signals": len(ACTIVE_SIGNALS_DB), "history_count": len(HISTORY_SIGNALS_DB),
-            "active_swing_bots": sum(1 for b in CLOUD_BOT_USERS.values() if b.get("is_running")),
-            "binance_symbols": len(BINANCE_SYMBOLS), "bybit_symbols": len(BYBIT_SYMBOLS),
-            "combined_symbols": len(EXCHANGE_SYMBOLS)}
+    return {"service": APP_NAME, "status": "online", "docs": "/docs"}
 
-@app.post("/api/register")
-def register(data: RegisterModel):
-    email = data.email.lower().strip()
-    with db_cursor() as conn:
-        if conn.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
-            raise HTTPException(409, "This email is already registered")
-        conn.execute("INSERT INTO users(email,password_hash,created_at,is_vip,vip_until) VALUES(?,?,?,?,?)",
-                     (email, password_hash(data.password), now_ts(), int(email == ADMIN_EMAIL),
-                      now_ts() + (999999999 if email == ADMIN_EMAIL else 0)))
-    user = db_user(email)
-    USERS_DB[email] = user
-    return {"status": "success", "message": "Welcome!", **safe_user_info(user, email)}
 
-@app.post("/api/login")
-def login(data: LoginModel):
-    email = data.email.lower().strip()
-    user = db_user(email)
-    if not user or not verify_password(data.password, user["password_hash"]):
-        raise HTTPException(401, "Invalid Email or Password")
-    USERS_DB[email] = user
-    return safe_user_info(user, email)
+@app.get("/health")
+def health():
+    ffmpeg_ok = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+    with db_connect() as conn:
+        queued = conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE status='queued'").fetchone()["n"]
+        processing = conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE status='processing'").fetchone()["n"]
+    return {
+        "status": "ok" if ffmpeg_ok else "degraded",
+        "ffmpeg_available": ffmpeg_ok,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "queued_jobs": queued,
+        "processing_jobs": processing
+    }
 
-@app.post("/api/admin/grant-vip")
-def admin_grant_vip(data: AdminGrantVipModel):
-    admin_email = data.admin_email.lower().strip()
-    if admin_email != ADMIN_EMAIL or not ADMIN_PASSWORD or not hmac.compare_digest(data.admin_password, ADMIN_PASSWORD):
-        raise HTTPException(403, "Forbidden: invalid admin credentials")
-    target = data.target_email.lower().strip()
-    user = db_user(target)
+
+@app.post("/auth/register")
+async def register(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    email = normalize_email(data.get("email") or data.get("user_email"))
+    password = str(data.get("password") or "")
+    device_id = str(data.get("device_id") or "UNKNOWN")[:200]
+    if not email or "@" not in email or not password:
+        raise HTTPException(status_code=400, detail="Valid email and password are required.")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must contain at least 8 characters.")
+    with db_connect() as conn:
+        try:
+            conn.execute("""
+                INSERT INTO users
+                (email, password_hash, is_vip, vip_expiry, monthly_jobs_used, last_reset_month, device_id, created_at)
+                VALUES (?, ?, 0, NULL, 0, ?, ?, ?)
+            """, (email, hash_password(password), current_month(), device_id, utcnow().isoformat()))
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="This email is already registered.")
+    return {"status": "success", "message": "Account created."}
+
+
+@app.post("/auth/login")
+async def login(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    email = normalize_email(data.get("email") or data.get("user_email"))
+    password = str(data.get("password") or "")
+    user = get_user(email)
+    if not user or not user["password_hash"] or not verify_password(password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    month = current_month()
+    with db_connect() as conn:
+        if user["last_reset_month"] != month:
+            conn.execute("UPDATE users SET monthly_jobs_used=0, last_reset_month=? WHERE email=?", (month, email))
+            used = 0
+        else:
+            used = user["monthly_jobs_used"] or 0
+    is_admin = bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
+    vip = bool(user["is_vip"])
+    expiry = user["vip_expiry"]
+    if vip and expiry:
+        try:
+            vip = datetime.strptime(expiry, "%Y-%m-%d").date() >= datetime.now().date()
+        except ValueError:
+            vip = False
+    if is_admin:
+        vip = True
+    return {
+        "status": "success", "email": email, "is_vip": vip,
+        "is_admin": is_admin, "links_used": used,
+        "monthly_limit": None if vip else FREE_MONTHLY_JOBS
+    }
+
+
+@app.post("/auth/forgot-password")
+async def forgot_password(request: Request):
+    # Configure a real email provider before enabling password recovery in production.
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    email = normalize_email(data.get("email"))
+    if not email or not get_user(email):
+        # Avoid exposing whether an account exists.
+        return {"status": "success", "message": "If the account exists, password recovery instructions will be sent."}
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    otp_storage[email] = {"otp": otp, "expires": time.time() + 600}
+    # OTP is not returned to the client and no email is sent by this template.
+    # Add SMTP/provider delivery before using this endpoint for real recovery.
+    logger.warning("Password recovery requested for %s; email delivery is not configured.", email)
+    return {"status": "error", "message": "Password recovery email is not configured. Contact the administrator."}
+
+
+@app.post("/auth/reset-password")
+async def reset_password(request: Request):
+    raise HTTPException(status_code=501, detail="Password reset is disabled until a verified email delivery provider is configured.")
+
+
+@app.post("/admin/activate-vip")
+async def activate_vip(request: Request, x_admin_password: str | None = Header(default=None)):
+    if not ADMIN_EMAIL or not ADMIN_PASSWORD or not x_admin_password:
+        raise HTTPException(status_code=403, detail="Admin authentication required.")
+    if not secrets.compare_digest(x_admin_password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=403, detail="Invalid admin credentials.")
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    target_email = normalize_email(data.get("target_user_email") or data.get("user_email"))
+    if not target_email:
+        raise HTTPException(status_code=400, detail="Target user email is required.")
+    expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+    with db_connect() as conn:
+        cur = conn.execute("UPDATE users SET is_vip=1, vip_expiry=? WHERE email=?", (expiry, target_email))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found.")
+    return {"status": "success", "message": f"VIP activated for 30 days.", "vip_expiry": expiry}
+
+
+@app.post("/process-video")
+async def process_video(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    email = normalize_email(data.get("email") or data.get("user_email"))
+    url = str(data.get("video_url") or data.get("url") or data.get("link") or "").strip()
+    if not email or not url:
+        raise HTTPException(status_code=400, detail="Email and video URL are required.")
+    if not valid_source_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="Supported sources: TikTok, Facebook, Instagram, X/Twitter, and Pinterest. YouTube is not supported."
+        )
+    user = get_user(email)
     if not user:
-        raise HTTPException(404, "Target user must register first")
-    new_expiry = max(now_ts(), float(user["vip_until"])) + data.days * 86400
-    with db_cursor() as conn:
-        conn.execute("UPDATE users SET is_vip=1,vip_until=? WHERE email=?", (new_expiry, target))
-        conn.execute("INSERT INTO vip_audit(admin_email,target_email,days,created_at) VALUES(?,?,?,?)",
-                     (admin_email, target, data.days, now_ts()))
-    USERS_DB[target] = db_user(target)
-    return {"status": "success", "target_email": target, "vip_expires_at": datetime.fromtimestamp(new_expiry, SRI_LANKA_TZ).strftime("%Y-%m-%d %I:%M %p")}
+        raise HTTPException(status_code=404, detail="User account not found. Please register or log in.")
+    is_admin = bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
+    is_vip = bool(user["is_vip"]) or is_admin
+    if is_vip and user["vip_expiry"] and not is_admin:
+        try:
+            is_vip = datetime.strptime(user["vip_expiry"], "%Y-%m-%d").date() >= datetime.now().date()
+        except ValueError:
+            is_vip = False
+    month = current_month()
+    with db_connect() as conn:
+        if user["last_reset_month"] != month:
+            conn.execute("UPDATE users SET monthly_jobs_used=0, last_reset_month=? WHERE email=?", (month, email))
+            used = 0
+        else:
+            used = user["monthly_jobs_used"] or 0
+        if not is_vip and used >= FREE_MONTHLY_JOBS:
+            raise HTTPException(status_code=403, detail=f"Monthly free limit of {FREE_MONTHLY_JOBS} jobs reached. VIP required.")
+        # Count one job at submission, preventing parallel requests bypassing the quota.
+        conn.execute("UPDATE users SET monthly_jobs_used=monthly_jobs_used+1 WHERE email=?", (email,))
+        job_id = uuid.uuid4().hex
+        now = utcnow().isoformat()
+        conn.execute("""
+            INSERT INTO jobs (job_id, email, source_url, status, progress, message, created_at, updated_at)
+            VALUES (?, ?, ?, 'queued', 0, 'Queued for processing', ?, ?)
+        """, (job_id, email, url, now, now))
+    return {
+        "status": "success",
+        "job_id": job_id,
+        "job_status_url": f"/jobs/{job_id}",
+        "message": "Video job queued. Poll the job status endpoint until completed."
+    }
 
-@app.get("/api/admin/users-list")
-def admin_users_list(admin_email: str = Query(""), admin_password: str = Query("")):
-    if admin_email.lower().strip() != ADMIN_EMAIL or not ADMIN_PASSWORD or not hmac.compare_digest(admin_password, ADMIN_PASSWORD):
-        raise HTTPException(403, "Access denied")
-    with db_cursor() as conn:
-        rows = conn.execute("SELECT email,created_at,is_vip,vip_until FROM users ORDER BY created_at DESC").fetchall()
-    users = []
-    for row in rows:
-        users.append({"email": row["email"], "is_vip": bool(row["is_vip"] and row["vip_until"] > now_ts()),
-                      "vip_days_remaining": max(0, int((row["vip_until"] - now_ts()) / 86400)),
-                      "has_bot_synced": bool(CLOUD_BOT_USERS.get(row["email"], {}).get("is_running"))})
-    return {"status": "success", "total_users": len(users), "users": users}
 
-@app.post("/api/bot/save-settings")
-def save_bot_settings(data: CloudBotConfigModel):
-    email = data.email.lower().strip()
-    user = db_user(email)
-    if not user:
-        raise HTTPException(401, "Please register/login first")
-    old = CLOUD_BOT_USERS.get(email, {})
-    bot = {"api_key": data.api_key.strip() or old.get("api_key", ""),
-           "api_secret": data.api_secret.strip() or old.get("api_secret", ""),
-           "max_trades": data.max_trades, "margin_usdt": data.margin_usdt,
-           "leverage": data.leverage, "is_running": bool(data.is_running),
-           "active_positions": old.get("active_positions", [])}
-    if bot["is_running"] and not (bot["api_key"] and bot["api_secret"]):
-        raise HTTPException(400, "Binance API key and secret are required")
-    if bot["is_running"] and not LIVE_TRADING_ENABLED:
-        bot["is_running"] = False
-        CLOUD_BOT_USERS[email] = bot
-        persist_bot_settings(email, bot)
-        return {"status": "success", "message": "Settings saved. Live trading is disabled on server; bot remains stopped.",
-                "live_trading_enabled": False}
-    CLOUD_BOT_USERS[email] = bot
-    persist_bot_settings(email, bot)
-    return {"status": "success", "message": "Bot settings saved", "live_trading_enabled": LIVE_TRADING_ENABLED,
-            "max_trades": bot["max_trades"], "margin_usdt": bot["margin_usdt"], "leverage": bot["leverage"],
-            "is_running": bot["is_running"]}
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str, request: Request):
+    email = normalize_email(request.query_params.get("email"))
+    if not email:
+        raise HTTPException(status_code=400, detail="Email query parameter is required.")
+    with db_connect() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id=? AND email=?", (job_id, email)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    response = {
+        "status": row["status"],
+        "job_id": row["job_id"],
+        "progress": row["progress"],
+        "message": row["message"],
+        "error": row["error"]
+    }
+    if row["status"] == "completed" and row["results_json"]:
+        response["results"] = json.loads(row["results_json"])
+    return response
 
-@app.get("/api/bot/status")
-def get_bot_status(email: str = Query("")):
-    email = email.lower().strip()
-    bot = CLOUD_BOT_USERS.get(email, {})
-    return {"status": "success", "bot": {"is_running": bool(bot.get("is_running")),
-            "active_positions": bot.get("active_positions", []), "max_trades": bot.get("max_trades", 1),
-            "margin_usdt": bot.get("margin_usdt", 5), "leverage": bot.get("leverage", 3),
-            "has_api_key": bool(bot.get("api_key")), "live_trading_enabled": LIVE_TRADING_ENABLED}}
 
-@app.get("/api/coins")
-def get_coin_list(exchange: str = Query("all")):
-    exchange = exchange.lower()
-    symbols = []
-    for sym, meta in EXCHANGE_SYMBOLS.items():
-        if exchange == "binance" and not meta["is_binance"]: continue
-        if exchange == "bybit" and not meta["is_bybit"]: continue
-        price = GLOBAL_LIVE_PRICES.get(sym, 0.0)
-        symbols.append({**meta, "price": fmt_price(price) if price else None,
-                        "change_24h": TICKER_24HR_CACHE.get(sym, {}).get("change")})
-    symbols.sort(key=lambda x: (x["symbol"]))
-    return {"status": "success", "count": len(symbols), "coins": symbols}
+@app.get("/jobs/{job_id}/results")
+async def get_job_results(job_id: str, request: Request):
+    email = normalize_email(request.query_params.get("email"))
+    if not email:
+        raise HTTPException(status_code=400, detail="Email query parameter is required.")
+    with db_connect() as conn:
+        row = conn.execute("SELECT status, results_json, error FROM jobs WHERE job_id=? AND email=?", (job_id, email)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if row["status"] != "completed":
+        return {"status": row["status"], "message": "Results are not ready yet.", "error": row["error"]}
+    return {"status": "success", "results": json.loads(row["results_json"] or "[]")}
 
-@app.get("/api/radar")
-def get_live_radar():
-    signals = []
-    for symbol, sig in list(ACTIVE_SIGNALS_DB.items()):
-        price = GLOBAL_LIVE_PRICES.get(symbol, 0.0)
-        if price > 0:
-            sig.update({"live_price": fmt_price(price), "current_price": fmt_price(price),
-                        "mark_price": fmt_price(price), "last_price": fmt_price(price),
-                        "realtime_price": fmt_price(price), "raw_price": price})
-        signals.append(sig)
-    signals.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return {"status": "success", "active_signals_count": len(signals), "signals": signals}
 
-@app.get("/api/radar-history")
-def get_radar_history():
-    tp = sum(1 for s in HISTORY_SIGNALS_DB if "TP HIT" in s.get("status", ""))
-    sl = sum(1 for s in HISTORY_SIGNALS_DB if "SL HIT" in s.get("status", ""))
-    total = tp + sl
-    win_rate = round(tp / total * 100, 1) if total else 0.0
-    return {"status": "success", "total_history": len(HISTORY_SIGNALS_DB), "tp_hits": tp,
-            "sl_hits": sl, "win_rate": f"{win_rate}%", "history": HISTORY_SIGNALS_DB}
+@app.get("/admin/jobs")
+async def admin_jobs(x_admin_password: str | None = Header(default=None), limit: int = 50):
+    if not ADMIN_PASSWORD or not x_admin_password or not secrets.compare_digest(x_admin_password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=403, detail="Admin authentication required.")
+    limit = max(1, min(limit, 200))
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT job_id,email,status,progress,message,error,created_at,updated_at FROM jobs ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    return {"jobs": [dict(row) for row in rows]}
 
-@app.get("/api/signal")
-def get_smc_signal(symbol: str = Query("BTCUSDT"), timeframe: str = Query("5m")):
-    symbol = normalize_symbol(symbol)
-    if symbol in ACTIVE_SIGNALS_DB:
-        return {"status": "success", **ACTIVE_SIGNALS_DB[symbol]}
-    signal = generate_instant_smc_setup(symbol)
-    if signal:
-        return {"status": "success", **signal}
-    price = get_single_ticker(symbol)
-    return {"status": "success", "symbol": symbol, "timeframe": timeframe, "signal": "NEUTRAL",
-            "setup": "No confirmed MTF SMC setup", "trend": "NEUTRAL", "price": fmt_price(price),
-            "confidence": None, "grade": "NO TRADE", "entry": "N/A", "take_profit": "N/A",
-            "stop_loss": "N/A", "sweep_level": "N/A",
-            **EXCHANGE_SYMBOLS.get(symbol, {"exchange_badge": "NOT LISTED", "is_binance": False, "is_bybit": False}),
-            "scanned_time": get_current_sl_time(), "sparkline": []}
 
-@app.get("/api/refresh-coin-price")
-def refresh_single_coin_price(symbol: str = Query("")):
-    if not symbol: raise HTTPException(400, "Symbol parameter is required")
-    sym = normalize_symbol(symbol)
-    price = get_single_ticker(sym)
-    formatted = fmt_price(price)
-    return {"status": "success", "symbol": sym, "price": formatted, "live_price": formatted,
-            "current_price": formatted, "mark_price": formatted, "last_price": formatted,
-            "realtime_price": formatted, "raw_price": price, "updated_at": get_current_sl_time()}
+@app.on_event("startup")
+async def cleanup_old_files():
+    # Remove old output files and completed/failed job records after retention.
+    cutoff = utcnow() - timedelta(days=JOB_RETENTION_DAYS)
+    try:
+        with db_connect() as conn:
+            old = conn.execute(
+                "SELECT job_id FROM jobs WHERE updated_at < ? AND status IN ('completed','failed')",
+                (cutoff.isoformat(),)
+            ).fetchall()
+            for row in old:
+                for p in OUTPUT_DIR.glob(f"{row['job_id']}_part_*.mp4"):
+                    p.unlink(missing_ok=True)
+                conn.execute("DELETE FROM jobs WHERE job_id=?", (row["job_id"],))
+    except Exception:
+        logger.exception("Old job cleanup failed")
 
-@app.get("/api/crypto/live-price/{symbol}")
-def get_coin_live_price_path(symbol: str):
-    return refresh_single_coin_price(symbol=symbol)
 
-@app.get("/api/live-tickers")
-def get_live_tickers_fast():
-    return {"status": "success", "prices": GLOBAL_LIVE_PRICES}
-
-@app.get("/api/prices")
-def get_live_prices(symbols: str = Query("")):
-    result = {}
-    for raw in symbols.split(","):
-        if not raw.strip(): continue
-        sym = normalize_symbol(raw)
-        price = GLOBAL_LIVE_PRICES.get(sym, 0.0) or get_single_ticker(sym)
-        if price > 0: result[sym] = fmt_price(price)
-    return {"status": "success", "prices": result}
-
-@app.get("/api/news-alerts")
-def get_news_alerts():
-    return {"status": "success", "has_high_impact_news": False, "event_name": None,
-            "note": "No real news provider is connected."}
-
-@app.get("/api/my-trades")
-def get_user_my_trades(email: str = Query("")):
-    email = email.lower().strip()
-    trades = read_trades(email)
-    for trade in trades:
-        price = GLOBAL_LIVE_PRICES.get(trade["symbol"], 0.0)
-        if price <= 0: price = get_single_ticker(trade["symbol"])
-        trade["entry_price"] = fmt_price(trade["entry"])
-        trade["take_profit"] = fmt_price(trade["tp"])
-        trade["stop_loss"] = fmt_price(trade["sl"])
-        trade["live_price"] = fmt_price(price) if price else None
-        if trade["status"] == "OPEN" and price and trade["entry"]:
-            diff = (price - trade["entry"]) if "BUY" in trade["side"].upper() else (trade["entry"] - price)
-            trade["unrealized_pnl"] = round(diff * trade["qty"], 6)
-            trade["live_pnl"] = f"${trade['unrealized_pnl']:+.2f}"
-    return {"status": "success", "count": len(trades), "trades": trades}
-
-@app.get("/api/binance-history")
-def get_binance_history(email: str = Query("")):
-    trades = read_trades(email.lower().strip())
-    closed = [t for t in trades if str(t.get("status", "")).startswith("CLOSED")]
-    realized = sum(float(t.get("realized_pnl") or 0) for t in closed)
-    return {"status": "success", "count": len(closed), "realized_pnl": round(realized, 6), "history": closed}
-
-@app.get("/api/history")
-def get_history_alias(email: str = Query("")):
-    return get_binance_history(email=email)
-
-@app.on_event("shutdown")
-def shutdown():
-    try: session.close()
-    except Exception: pass
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT, workers=1)
