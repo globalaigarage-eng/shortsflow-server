@@ -1,0 +1,11 @@
+Separate startup issue shown in the logs:
+sqlite3.IntegrityError: UNIQUE constraint failed: users.email
+
+Your server.py admin setup tries to INSERT the admin user every time, even when the email already exists. Change that INSERT to INSERT OR IGNORE, or check for the email before inserting.
+
+Example SQL:
+INSERT OR IGNORE INTO users
+(email, password, is_vip, vip_expiry, monthly_clips_used, last_reset_month, device_id)
+VALUES (?, ?, 1, '2099-12-31', 0, ?, 'ADMIN_DEVICE')
+
+This database issue is separate from the missing FFmpeg executable.
